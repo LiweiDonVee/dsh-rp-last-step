@@ -1,0 +1,75 @@
+{
+  "name": "dsh-rp-last-step",
+  "version": "0.1.0",
+  "description": "DSH RP 最后一步：SillyTavern 预设适配、模块热组装与独立呈现",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/host.js",
+  "exports": {
+    ".": "./dist/host.js",
+    "./client": "./dist/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24",
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "lint": "oxlint src tests scripts vitest.config.js --deny-warnings",
+    "test": "pnpm test:host && pnpm test:ui",
+    "test:host": "node --test tests/*.test.mjs",
+    "test:ui": "vitest run",
+    "check": "pnpm lint && pnpm test && pnpm build",
+    "package": "pnpm build && node scripts/pack.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "esbuild": "^0.28.2",
+    "jsdom": "^26.1.0",
+    "oxlint": "^1.78.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vitest": "^4.1.11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LiweiDonVee/dsh-rp-last-step.git"
+  },
+  "homepage": "https://github.com/LiweiDonVee/dsh-rp-last-step#readme",
+  "bugs": {
+    "url": "https://github.com/LiweiDonVee/dsh-rp-last-step/issues"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "keywords": [
+    "deepseek-harness",
+    "roleplay",
+    "sillytavern",
+    "prompt-preset"
+  ]
+}

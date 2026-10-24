@@ -1,0 +1,12 @@
+{
+  "packet": {
+    "playerAction": "我试着推开门。",
+    "sceneInstruction": "只写本轮结果与可见反应。",
+    "resolvedChanges": ["推门失败，门没有打开。"],
+    "visibleConsequences": ["门内传来插闩的轻响。"],
+    "openHooks": ["门外的人仍可继续交涉。"],
+    "proseConstraints": ["保持失败结果，不替玩家选择下一步。"],
+    "publicFactRefs": ["door-check:turn-1"],
+    "variables": {"tone": "克制"}
+  }
+}
