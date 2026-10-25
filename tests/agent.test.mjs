@@ -129,6 +129,17 @@ test('rp_present accepts only one direct call in the latest assistant message an
   assert.equal(f.concluded(), 1);
 });
 
+test('terminal retry accepts only a failed-receipt reference and never fabricates another direction packet',async()=>{
+  const f=fixture();module.registerRpLastStepAgent(f.ctx,f.service);
+  const tool=f.tools.get('rp_present');
+  await tool.execute({rewriteOf:'failed-receipt'},f.exec);
+  assert.equal(f.calls[0][1].rewriteOf,'failed-receipt');
+  assert.equal(f.calls[0][1].packet,undefined);
+  assert.equal(f.concluded(),1);
+  await assert.rejects(tool.execute({packet:{playerAction:'retry'},rewriteOf:'failed'},f.exec),{code:'INVALID_TOOL_ARGUMENTS'});
+  await assert.rejects(tool.execute({rewriteOf:''},f.exec),{code:'INVALID_TOOL_ARGUMENTS'});
+});
+
 test('presenter failure or cancellation cannot conclude the main turn', async () => {
   const f = fixture();
   module.registerRpLastStepAgent(f.ctx, f.service);

@@ -19,6 +19,8 @@ export function publicReceipt(value) {
   result.text = typeof value.text === 'string' ? value.text : '';
   if (record(value.models)) result.models = Object.fromEntries(Object.entries(value.models).map(([stage, config]) => [stage, resolveModelConfig(config)]));
   if (value.truncated === true) result.truncated = true;
+  if (['failed','cancelled'].includes(value.status) && Array.isArray(value.compiled?.messages)) result.canRetry=true;
+  if (typeof value.rewriteOf==='string') {result.rewriteOf=value.rewriteOf;result.playerAction=value.packet?.playerAction;}
   if (record(value.contextPreparation)) {
     const prepared=value.contextPreparation;
     result.context={id:prepared.id,...prepared.database?{database:clone(prepared.database)}:{},history:(prepared.materials?.history??[]).map(item=>({id:item.id,mode:item.mode,source:clone(item.source)})),chars:prepared.materials?.chars,models:clone(prepared.models??{})};

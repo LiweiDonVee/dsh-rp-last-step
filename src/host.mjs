@@ -299,7 +299,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     },
     catalog(input) {
       const captured = { sessionId: input.sessionId, signal: input.signal };
-      return run(captured.signal, async (combined) => { const binding = await bound(captured.sessionId, combined); return { revision: (await store.snapshot()).revision, profileId: binding.profileId, version: binding.version, entries: entriesFor(binding).map((entry) => publicEntry(entry)) }; });
+      return run(captured.signal, async (combined) => { const binding = await bound(captured.sessionId, combined); return { revision: (await store.snapshot()).revision, profileId: binding.profileId, version: binding.version, entries: entriesFor(binding).map((entry) => publicEntry(entry)),presentations:(await presenter.state(captured.sessionId)).filter(item=>item.canRetry).map(item=>({id:item.id,status:item.status,canRetry:true})) }; });
     },
     read(input) {
       const captured = { sessionId: input.sessionId, entryIds: copy(input.entryIds), signal: input.signal };
@@ -316,11 +316,11 @@ export async function createRpLastStepHost(ctx, options = {}) {
       return mutation(input.signal, async (combined) => { await bound(captured.sessionId, combined); combined.throwIfAborted(); return store.applyOperations(captured.sessionId, captured.operations, { expectedRevision: captured.expectedRevision }); }, captured.sessionId);
     },
     present(input) {
-      const captured = { sessionId: input.sessionId, contextKey: input.contextKey, packet: copy(input.packet), callId: input.callId };
+      const captured = { sessionId: input.sessionId, contextKey: input.contextKey, packet: copy(input.packet), rewriteOf:input.rewriteOf,callId: input.callId };
       return run(input.signal, async (combined) => {
         try {
           await bound(captured.sessionId, combined);
-          const result = await presenter.present({ sessionId: captured.sessionId, contextKey: captured.contextKey, packet: captured.packet, baseModel: baseFor(captured.sessionId, input.agent), signal: combined });
+          const result = captured.rewriteOf===undefined?await presenter.present({ sessionId: captured.sessionId, contextKey: captured.contextKey, packet: captured.packet, baseModel: baseFor(captured.sessionId, input.agent), signal: combined }):await presenter.rewrite({sessionId:captured.sessionId,contextKey:captured.contextKey,presentationId:captured.rewriteOf,baseModel:baseFor(captured.sessionId,input.agent),signal:combined});
           if (captured.callId) presentations.set(callKey(captured.sessionId, captured.callId), result.id);
           return result;
         } catch (error) {

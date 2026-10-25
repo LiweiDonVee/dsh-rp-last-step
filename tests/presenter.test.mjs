@@ -70,6 +70,25 @@ test('optional context preparation freezes database and historical materials bef
   assert.equal(JSON.stringify(result).includes('The lighthouse remains dark.'),false);
 });
 
+test('failed frozen prose can be retried with only the writer, preserving database and context materials',async t=>{
+  let preparations=0;
+  const f=await fixture(t,{prepareContext:async()=>{preparations++;return{id:'prepared',materials:{entries:[{id:'fact',content:'Frozen failure'}],history:[],recentProse:[],guidance:'Keep failure'},models:{}}},steps:[{commit:true},new Error('writer unavailable'),request=>{
+    assert.equal(request.stageId,'rp-last-step.render');
+    assert.equal(request.input.context.entries[0].content,'Frozen failure');
+    assert.deepEqual(request.input.packet,packet);
+    return'Rewritten prose, same failed action.';
+  }]});
+  await assert.rejects(present(f.presenter),{code:'PRESENTATION_FAILED'});
+  const failed=(await f.presenter.state('story'))[0];
+  assert.equal(failed.canRetry,true);
+  const retried=await f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'explicit-retry',baseModel});
+  assert.equal(preparations,1);
+  assert.deepEqual(f.calls.map(call=>call.stageId),['rp-last-step.assemble','rp-last-step.render','rp-last-step.render']);
+  assert.equal(retried.rewriteOf,failed.id);
+  assert.equal(retried.text,'Rewritten prose, same failed action.');
+  await assert.rejects(f.presenter.rewrite({sessionId:'other',presentationId:failed.id,contextKey:'foreign',baseModel}),{code:'RECEIPT_NOT_FOUND'});
+});
+
 test('assembly reads and patches the latest local overlay, then freezes only render/shared inputs for the writer', async (t) => {
   const f = await fixture(t, { entries: [entry('style', 'Old style'), entry('unused', 'DO NOT LOAD THIS', { enabled: false }), entry('simulation', 'PRIVATE AGENT RULE', { phase: 'agent' }), entry('slot', 'Mood {{mood}}')], steps: [
     { read: ['style'], operations: [{ op: 'replace', entryId: 'style', content: 'New style' }], commit: false },
