@@ -19,6 +19,10 @@ export function publicReceipt(value) {
   result.text = typeof value.text === 'string' ? value.text : '';
   if (record(value.models)) result.models = Object.fromEntries(Object.entries(value.models).map(([stage, config]) => [stage, resolveModelConfig(config)]));
   if (value.truncated === true) result.truncated = true;
+  if (record(value.contextPreparation)) {
+    const prepared=value.contextPreparation;
+    result.context={id:prepared.id,...prepared.database?{database:clone(prepared.database)}:{},history:(prepared.materials?.history??[]).map(item=>({id:item.id,mode:item.mode,source:clone(item.source)})),chars:prepared.materials?.chars,models:clone(prepared.models??{})};
+  }
   return result;
 }
 

@@ -48,6 +48,28 @@ test('direction packets whitelist visible fields and freeze detached facts', () 
   for (const invalid of [{ ...packet, rawState: {} }, { ...packet, tools: [] }, { ...packet, playerAction: '' }, { ...packet, variables: { secret: {} } }, { ...packet, openHooks: 'bad' }]) assert.throws(() => normalizeDirectionPacket(invalid), { code: 'INVALID_DIRECTION_PACKET' });
 });
 
+test('optional context preparation freezes database and historical materials before module assembly and writer dispatch', async t => {
+  let prepared=0;
+  const source={id:'material-id',materials:{entries:[{id:'lighthouse',version:3,content:'The lighthouse remains dark.',notes:'The witness is unsure.'}],history:[{id:'past',mode:'summary',content:'A promise remains unfulfilled.',source:{resultSeq:3}}],guidance:'Preserve the failed attempt.',unresolved:['Who holds the key?'],recentProse:['The rain began.'],chars:440},database:{databaseId:'db',version:1,revision:4,entryRefs:[{id:'lighthouse',version:3}]},models:{prepare:{provider:'local',model:'gm'}}};
+  const f=await fixture(t,{prepareContext:async input=>{prepared++;assert.deepEqual(input.packet,packet);return source},steps:[request=>{
+    assert.equal(request.input.context.entries[0].content,'The lighthouse remains dark.');
+    source.materials.entries[0].content='Later external change';
+    return{commit:true};
+  },request=>{
+    assert.equal(request.input.context.entries[0].content,'The lighthouse remains dark.');
+    assert.deepEqual(request.input.recentProse,['The rain began.']);
+    assert.equal(request.tools,undefined);
+    return'Rain falls against the shut gate.';
+  }]});
+  const result=await present(f.presenter);
+  assert.equal(prepared,1);
+  const receipt=await f.receipts.get(result.id);
+  assert.equal(receipt.contextPreparation.id,'material-id');
+  assert.equal(receipt.contextPreparation.materials.entries[0].content,'The lighthouse remains dark.');
+  assert.equal(result.context.id,'material-id');
+  assert.equal(JSON.stringify(result).includes('The lighthouse remains dark.'),false);
+});
+
 test('assembly reads and patches the latest local overlay, then freezes only render/shared inputs for the writer', async (t) => {
   const f = await fixture(t, { entries: [entry('style', 'Old style'), entry('unused', 'DO NOT LOAD THIS', { enabled: false }), entry('simulation', 'PRIVATE AGENT RULE', { phase: 'agent' }), entry('slot', 'Mood {{mood}}')], steps: [
     { read: ['style'], operations: [{ op: 'replace', entryId: 'style', content: 'New style' }], commit: false },

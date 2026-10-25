@@ -199,6 +199,11 @@ export async function createRpLastStepHost(ctx, options = {}) {
     notify(event.sessionId, { ...event, type: 'stage' });
   }
   const presenter = createPresenter({ store, receipts, callModel, resolveModels, publish, skillText: skill.content, skillReference,
+    prepareContext:async input=>{
+      const context=ctx.get?.('rpContext');
+      if(!context)return null;
+      return context.prepare({...input,agent:ctx.agents.get(input.sessionId)});
+    },
     ...(options.maxAssemblySteps === undefined ? {} : { maxAssemblySteps: options.maxAssemblySteps }),
     ...(options.maxMigrationAttempts === undefined ? {} : { maxMigrationAttempts: options.maxMigrationAttempts }),
   });
