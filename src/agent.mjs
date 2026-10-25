@@ -136,7 +136,7 @@ export function registerRpLastStepAgent(ctx, service) {
         openHooks: strings, proseConstraints: strings, publicFactRefs: strings, variables: { type: 'object' },
       }, ['playerAction']),rewriteOf:string,factReceiptId:string }),oneOf:[{required:['packet']},{required:['rewriteOf']},{required:['factReceiptId']}]},
       output: {
-        schema: { type: 'object', properties: { id: string, status: { type: 'string', enum: ['rendered', 'complete'] }, text: string }, required: ['id', 'status', 'text'] },
+        schema: { type: 'object', properties: { id: string, status: { type: 'string', enum: ['rendered', 'complete'] }, text: string, factReceiptId: string }, required: ['id', 'status', 'text'] },
         render: (_args, value) => [{ type: 'text', text: value.text }],
         presentationMeta: (_args, value) => ({ rpLastStep: { schemaVersion: 1, record: { ...value, status: 'complete' } } }),
       },

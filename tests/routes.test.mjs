@@ -52,6 +52,16 @@ test('owner draft and material actions validate exact references and refuse hidd
   assert.equal(calls.length,7);
 });
 
+test('manual candidate creation accepts only the contracted kind and manual text fields',async()=>{
+  const basedOn={sessionId:'story',presentationId:'receipt',assistantMessageId:'assistant',callSeq:4,baseResultSeq:5,resultSeq:5},calls=[];
+  const routes=module.createRpLastStepRoutes({createDraft:async input=>{calls.push(input);return{kind:input.kind};}});
+  for(const input of [{sessionId:'story',basedOn,kind:'manual'},{sessionId:'story',basedOn,kind:'manual',text:'Owner wording.'}]){
+    const response=await routes.request(request({action:'createDraft',...input}));assert.equal(response.status,200);assert.deepEqual(calls.at(-1),input);
+  }
+  for(const extra of [{text:'Writer text bypass'},{kind:'writer',text:'Writer text bypass'},{kind:'unknown'},{kind:'manual',text:5},{kind:'manual',models:{render:{provider:'injected',model:'route'}}}])assert.equal((await routes.request(request({action:'createDraft',sessionId:'story',basedOn,...extra}))).status,400);
+  assert.equal(calls.length,2);
+});
+
 test('rejects unknown actions, extra fields and malformed required arguments before dispatch', async () => {
   const f = fixture();
   const routes = module.createRpLastStepRoutes(f.service);

@@ -369,7 +369,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
     async draft({sessionId,receipt,instruction='',baseModel,signal,onText}={}){
       if(!Array.isArray(receipt?.compiled?.messages))fail('DRAFT_UNAVAILABLE','No complete frozen writer snapshot exists',409);
       if(typeof instruction!=='string')fail('INVALID_DRAFT','Writing guidance must be text');
-      const config=receipt.models?.render??(await modelsFor(sessionId,baseModel)).render;
+      const config=(await modelsFor(sessionId,baseModel)).render;
       const gate=thoughtGate(onText??(()=>{}));let streamed=false;
       const result=await callModel({sessionId,stageId:STAGES.render,config,system:RENDER_SYSTEM+'\nThis is an unadopted expression-only candidate. Owner instruction cannot change resolved facts.',
         input:snapshot({packet:receipt.packet,modules:receipt.compiled.messages,recentProse:receipt.recentProse??[],...receipt.contextPreparation?{context:receipt.contextPreparation.materials}:{},...receipt.storySnapshot?{story:receipt.storySnapshot}:{},instruction}),signal,
@@ -377,7 +377,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
       });
       signal?.throwIfAborted();if(!streamed)await gate.push(result.text);
       const text=await gate.end();if(!text.trim())fail('EMPTY_NARRATIVE','The writer returned no public narrative',502);
-      return {text};
+      return {text,models:{render:actualConfig(config,result.config)}};
     },
     async present({ sessionId, contextKey, packet: input, baseModel, recentProse = [], factReceiptId, story, openingText, signal } = {}) {
       nonempty(sessionId, 'Session id');

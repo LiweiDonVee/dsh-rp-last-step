@@ -102,6 +102,18 @@ test('writer-only candidates reuse frozen modules and materials without normal p
   assert.equal((await f.receipts.get(result.id)).text,'Accepted prose.');
 });
 
+test('new candidates capture the current writer route once while retaining the original frozen material',async()=>{
+  const receipt={packet:{playerAction:'Push the gate.',resolvedChanges:['The gate remains closed.']},compiled:{messages:[{role:'system',content:'Frozen style.'}]},recentProse:['The rain began.'],contextPreparation:{materials:{entries:[{ref:{sourceKey:'world',entryId:'gate'},version:3,content:'Still locked.'}],history:[],recentProse:[],guidance:'Keep the failure.'}},storySnapshot:{title:'The Gate',character:{name:'Mara'},persona:{name:'Visitor'},examples:'Quiet speech.'},models:{render:{provider:'old',model:'writer-a'}}};
+  const before=structuredClone(receipt),requests=[];let route={provider:'new',model:'writer-b',reasoningEffort:'low'},resolved=0,release,entered;
+  const hold=new Promise(done=>{release=done;}),started=new Promise(done=>{entered=done;});
+  const presenter=createPresenter({store:{snapshot(){throw new Error('Candidate must not assemble modules');}},receipts:{create(){throw new Error('Candidate must not create a formal presentation');}},prepareContext(){throw new Error('Candidate must not reprepare Context');},resolveModels:async()=>{resolved++;return{render:route};},callModel:async request=>{requests.push(request);entered();await hold;return{text:'A new expression of the same failure.',config:{...request.config,maxTokens:77}};}});
+  const pending=presenter.draft({sessionId:'story',receipt,baseModel:{provider:'base',model:'current'},instruction:'Be concise.'});
+  await started;route.model='writer-c';release();const candidate=await pending;
+  assert.equal(resolved,1);assert.equal(requests.length,1);assert.deepEqual(requests[0].config,{provider:'new',model:'writer-b',reasoningEffort:'low'});
+  assert.equal(requests[0].stageId,'rp-last-step.render');assert.deepEqual(requests[0].input,{packet:before.packet,modules:before.compiled.messages,recentProse:before.recentProse,context:before.contextPreparation.materials,story:before.storySnapshot,instruction:'Be concise.'});
+  assert.deepEqual(candidate.models,{render:{provider:'new',model:'writer-b',reasoningEffort:'low',maxTokens:77}});assert.deepEqual(receipt,before);
+});
+
 test('note outcome releases assembly failure but frozen writer retry consumes the initial claim',async t=>{
   const outcomes=[];
   const material={id:'prepared',authorNote:{id:'note',version:1,claimId:'original-claim'},materials:{entries:[],history:[],recentProse:[],guidance:'Keep failure.'}};

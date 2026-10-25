@@ -11,6 +11,14 @@ test('effective narratives follow content replacements while retaining the actua
   assert.equal(events[5].data.meta.rpLastStep.record.text,'The gate stays shut.');
 });
 
+test('canonical narrative revisions preserve the original fact receipt association',()=>{
+  const events=baseEvents();events[5].data.meta.rpLastStep.record.factReceiptId='fact-turn';
+  assert.equal(readers.readNarratives('story',events)[0].factReceiptId,'fact-turn');
+  events.push(replacement(events));
+  assert.equal(readers.readNarratives('story',events)[0].factReceiptId,'fact-turn');
+  assert.equal(readers.readNarratives('story',events)[0].text,'The closed gate resists.');
+});
+
 test('compaction preserves effective originals but a branch replacement removes them',()=>{
   const events=baseEvents();events.push(replacement(events));
   events.push({seq:12,type:'user/message',surfaceOp:{op:'replace',startSeq:2,endSeq:10},sourceEventSeqs:[2,3,10],data:{source:{kind:'compact-checkpoint'}}});

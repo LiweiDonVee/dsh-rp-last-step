@@ -89,9 +89,11 @@ rp_last_step_catalog 的 presentations 只列出当前可重试失败记录。rp
 
 GM 绑定会话用 `rp_present({factReceiptId})` 读取可选 `rpGM.presentation` 的已提交事实；开场逐字返回 owner 选择，不调用 writer。普通回合将脱离复制的 `storySnapshot` 与方向包分别冻结，传给可选 Context、组装模型和 writer。旧会话继续使用 packet。
 
-`rpLastStep.narratives({sessionId,agent?,signal?})` 按有效 surface 和完整 call/result 来源链返回 NarrativeRecord。ref 包含 sessionId、presentationId、assistantMessageId、callSeq、baseResultSeq、resultSeq，修订键为 `JSON.stringify([presentationId,resultSeq])`。实际正文读取有效 message.content；原 meta.text 只标识原始执行档案。压缩保留原来源，回退替换排除失效分支。
+`rpLastStep.narratives({sessionId,agent?,signal?})` 按有效 surface 和完整 call/result 来源链返回 NarrativeRecord。ref 包含 sessionId、presentationId、assistantMessageId、callSeq、baseResultSeq、resultSeq，修订键为 `JSON.stringify([presentationId,resultSeq])`。实际正文读取有效 message.content；原 meta.text 只标识原始执行档案。公开 receipt、规范 meta.rpLastStep.record 和 NarrativeRecord 保留可选 factReceiptId，指向同一个稳定事实回执；旧 packet 会话可不含该字段。压缩保留原来源，回退替换排除失效分支。
 
-owner `createDraft/editDraft/drafts` 保存独立候选，写作只复用已冻结 receipt 的 packet、compiled、contextPreparation 和 storySnapshot。草稿进度使用 `rp-last-step/draft`；SSE 仅发送有限元数据。候选不修改正式 history。`material` 读取已保存输入并校验会话访问，不重新查询数据库。
+owner `createDraft/editDraft/drafts` 保存独立候选，写作复用已冻结 receipt 的 packet、compiled、contextPreparation 和 storySnapshot。每次新 writer 候选按当前 Loop render 路由和 owner 明确选择解析一次模型，进行中请求保持捕获配置；Draft.models.render 保存并公开实际 provider/model/reasoningEffort/maxTokens，不包含凭据。`createDraft` 的 kind 默认 writer；kind=manual 时直接保存 owner text，省略 text 则复制当前有效正文，不调用模型。`editDraft` 转为 manual，已有 models 可保留为原生成来源。草稿进度使用 `rp-last-step/draft`；SSE 仅发送有限元数据。候选不修改正式 history。
+
+`material` 读取已保存输入并校验会话访问，不重新查询数据库；本会话成功、失败与重试记录均可审计，未冻结字段可以为空，不要求存在活跃正式正文。其 factReceiptRef 是同一事实回执 ID 的字符串别名。Context 接受通知先核验实际有效正文，再核对本收据冻结的作者注版本与 claim，不只相信回调参数。
 
 作者注结果通知以 compiled writer snapshot 冻结为界：组装前失败释放 claim；writer 失败保留原 claim，成功重试提交实际 presentationId 和原 claimId。只有规范接受才消费，重复通知幂等。
 

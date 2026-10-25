@@ -163,7 +163,8 @@ export async function createRpLastStepHost(ctx, options = {}) {
   async function frozenReceipt(id,presentationId,events){
     const receipt=await receipts.get(presentationId);
     if(receipt?.sessionId===id)return receipt;
-    const narrative=receipt&&readNarratives(id,events??await narrativeEvents(id)).find(record=>record.ref.presentationId===presentationId);
+    if(receipt&&events===undefined)events=await narrativeEvents(id);
+    const narrative=receipt&&readNarratives(id,events).find(record=>record.ref.presentationId===presentationId);
     if(narrative){
       let origin;try{origin=JSON.parse(receipt.contextKey);}catch{/* Old invalid identities cannot authorize an inherited snapshot. */}
       const call=(events??[]).find(event=>event.seq===narrative.ref.callSeq);
@@ -308,22 +309,25 @@ export async function createRpLastStepHost(ctx, options = {}) {
       const captured=copy({sessionId:input.sessionId,presentationId:input.presentationId});
       return run(signal,async signal=>{
         await readSession(captured.sessionId,signal);
-        const receipt=await frozenReceipt(captured.sessionId,captured.presentationId,await narrativeEvents(captured.sessionId,undefined,signal));
+        const receipt=await frozenReceipt(captured.sessionId,captured.presentationId);
         return {presentationId:receipt.id,packet:copy(receipt.packet),...(receipt.factReceiptId?{factReceiptRef:receipt.factReceiptId}:{}),contextPreparation:copy(receipt.contextPreparation??null),compiled:copy(receipt.compiled??null),models:copy(receipt.models??{}),status:receipt.status};
       });
     },
     narratives(input,signal=input.signal){return run(signal,async combined=>({records:readNarratives(input.sessionId,await narrativeEvents(input.sessionId,input.agent,combined))}));},
     drafts(input,signal=input.signal){return run(signal,async combined=>{await readSession(input.sessionId,combined);return{drafts:await draftStore.list(input.sessionId)};});},
     createDraft(input,signal=input.signal){
-      const captured=copy({sessionId:input.sessionId,basedOn:input.basedOn,instruction:input.instruction});
+      const captured=copy({sessionId:input.sessionId,basedOn:input.basedOn,instruction:input.instruction,kind:input.kind??'writer',text:input.text});
       return run(signal,async combined=>{
-        const events=await narrativeEvents(captured.sessionId,undefined,combined);requireLatestNarrative(captured.sessionId,events,captured.basedOn);
+        if(!['writer','manual'].includes(captured.kind)||captured.text!==undefined&&(captured.kind!=='manual'||typeof captured.text!=='string'||!captured.text.trim()))throw new PresetError('INVALID_DRAFT','Provide a writer candidate or nonempty manual text');
+        const events=await narrativeEvents(captured.sessionId,undefined,combined),current=requireLatestNarrative(captured.sessionId,events,captured.basedOn);
         const receipt=await frozenReceipt(captured.sessionId,captured.basedOn.presentationId,events);
-        let draft=await draftStore.create({sessionId:captured.sessionId,basedOn:captured.basedOn,...receipt.factReceiptId?{factReceiptId:receipt.factReceiptId}:{},kind:'writer',status:'generating',text:''});
+        let draft=await draftStore.create({sessionId:captured.sessionId,basedOn:captured.basedOn,...receipt.factReceiptId?{factReceiptId:receipt.factReceiptId}:{},kind:captured.kind,status:captured.kind==='manual'?'ready':'generating',text:captured.kind==='manual'?captured.text??current.text:''});
+        if(captured.kind==='manual'){draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'ready'});return draft;}
         draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'generating'});
         try{
-          const result=await presenter.draft({sessionId:captured.sessionId,receipt,instruction:captured.instruction,baseModel:baseFor(captured.sessionId),signal:combined,onText:delta=>draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'generating',delta})});
-          draft=await draftStore.finish({sessionId:captured.sessionId,draftId:draft.id,expectedDraftVersion:draft.version,status:'ready',text:result.text});
+          const baseModel=migrationBaseFor(captured.sessionId,await readSession(captured.sessionId,combined));
+          const result=await presenter.draft({sessionId:captured.sessionId,receipt,instruction:captured.instruction,baseModel,signal:combined,onText:delta=>draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'generating',delta})});
+          draft=await draftStore.finish({sessionId:captured.sessionId,draftId:draft.id,expectedDraftVersion:draft.version,status:'ready',text:result.text,models:result.models});
           draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'ready'});return draft;
         }catch(error){await draftStore.finish({sessionId:captured.sessionId,draftId:draft.id,expectedDraftVersion:draft.version,status:'failed',text:''});draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'failed'});throw error;}
       });

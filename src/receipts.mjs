@@ -18,6 +18,7 @@ export function publicReceipt(value) {
     if (value[key] !== undefined) result[key] = clone(value[key]);
   }
   result.text = typeof value.text === 'string' ? value.text : '';
+  if (typeof value.factReceiptId === 'string') result.factReceiptId = value.factReceiptId;
   if (record(value.models)) result.models = Object.fromEntries(Object.entries(value.models).map(([stage, config]) => [stage, resolveModelConfig(config)]));
   if (value.truncated === true) result.truncated = true;
   if (typeof value.rewriteOf==='string') {result.rewriteOf=value.rewriteOf;result.playerAction=value.packet?.playerAction;}

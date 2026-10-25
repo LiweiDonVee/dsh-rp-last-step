@@ -58,7 +58,7 @@ export function readNarratives(sessionId,input){
     const source=resolve(event);if(!source)continue;
     const {base,call,assistant}=source,record=base.data.meta.rpLastStep.record;
     const user=events.findLast(candidate=>candidate.seq<assistant.seq&&active.has(candidate.seq)&&candidate.type==='user/message'&&candidate.data?.source?.kind==='user');
-    records.push({id:JSON.stringify([record.id,event.seq]),ref:{sessionId,presentationId:record.id,assistantMessageId:assistant.data.message.id,callSeq:call.seq,baseResultSeq:base.seq,resultSeq:event.seq},turn:base.data.turn,action:record.playerAction??textOf(user?.data),text:textOf(event.data.message),...(typeof record.createdAt==='string'?{createdAt:record.createdAt}:{})});
+    records.push({id:JSON.stringify([record.id,event.seq]),ref:{sessionId,presentationId:record.id,assistantMessageId:assistant.data.message.id,callSeq:call.seq,baseResultSeq:base.seq,resultSeq:event.seq},turn:base.data.turn,action:record.playerAction??textOf(user?.data),text:textOf(event.data.message),...(typeof record.factReceiptId==='string'?{factReceiptId:record.factReceiptId}:{}),...(typeof record.createdAt==='string'?{createdAt:record.createdAt}:{})});
   }
   return records.sort((a,b)=>a.ref.callSeq-b.ref.callSeq);
 }
