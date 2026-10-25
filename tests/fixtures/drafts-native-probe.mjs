@@ -55,6 +55,10 @@ export function apply(ctx){
         value=await invoke('create',{agentPreset:'last-step-drafts-story'},request.signal);
         const profile=await last.ensureBuiltinProfile({key:'last-step-native-probe.v1',profile:{name:'Synthetic native prose',entries:[{id:'style',content:'Write concise public prose, preserving the gate failure.',phase:'render',role:'system',required:true,locked:true}]}});
         await last.bindSession({sessionId:value.sessionId,...profile,expectedRevision:(await last.state(value.sessionId)).revision});
+      }else if(input.action==='createUnusedStyle'){
+        const rawText='{ "name":"Pinned StyleV1", "prompts":[{"identifier":"style","content":"Unused asset default style."}] }',imported=await last.importSillyTavern({rawText,expectedRevision:(await last.state(input.sessionId)).revision}),profile=(await last.profile({profileId:imported.profileId,version:1})).profile;
+        const latest=await last.saveProfile({profile:{...profile,entries:profile.entries.map(entry=>({...entry,content:'Later unused style.'}))},expectedRevision:(await last.state(input.sessionId)).revision});
+        value={ref:{profileId:profile.id,version:1},profile,source:(await last.source({sourceId:profile.sourceId})).source,latestVersion:latest.version};
       }else if(input.action==='run'){await invoke('prompt',{sessionId:input.sessionId,requestId:crypto.randomUUID(),mode:'queue',content:[{type:'text',text:input.text}]},request.signal);await ctx.agents.get(input.sessionId).whenIdle();value=await snapshot(input.sessionId);}
       else if(input.action==='armAdoptionGate'){armAdoptionGate();value={armed:true};}
       else if(input.action==='awaitAdoptionGate'){await Promise.race([adoptionGate.ready,new Promise((_resolve,reject)=>setTimeout(()=>reject(Error('Final adoption read did not pause')),10000))]);value={held:adoptionGate.held,reads:adoptionGate.reads};}
@@ -64,7 +68,7 @@ export function apply(ctx){
       else if(input.action==='contentRevision')value=await last.contentRevision();
       else if(input.action==='retryMode'){retryMode=input.mode;value={retryMode};}
       else if(input.action==='fork'){value=await invoke('fork',{sessionId:input.sessionId,atSeq:input.atSeq},request.signal);if(typeof last.inheritSession==='function')await last.inheritSession({parentSessionId:input.sessionId,sessionId:value.sessionId,signal:request.signal});}
-      else if(input.action==='exportState')value=await last.exportState({sessionIds:input.sessionIds,signal:request.signal});
+      else if(input.action==='exportState')value=await last.exportState({sessionIds:input.sessionIds,additionalProfileRefs:input.additionalProfileRefs,signal:request.signal});
       else if(input.action==='preflightRestore')value=await last.preflightRestore({sessionIds:input.sessionIds,state:input.state,signal:request.signal});
       else if(input.action==='restoreState')value=await last.restoreState({restoreId:input.restoreId,sessionIds:input.sessionIds,state:input.state,expectedRevision:(await last.contentRevision()).revision,signal:request.signal});
       else if(input.action==='importSession'){const handle=await ctx.sessionPersistence.create(input.header,{inheritedEventCount:input.inheritedEventCount});try{await handle.append(input.events);await handle.flush();}finally{await handle.close();}value={sessionId:input.header.id};}

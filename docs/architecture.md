@@ -117,6 +117,8 @@ material 的可选 storySnapshot 是该 receipt 冻结并安全投影的固定�
 
 plugin-only `exportState/preflightRestore/restoreState` 只管理 LastStep 依赖数据：所需 source/profile 版本、binding、冻结 receipt 和 versioned drafts。preflight 可在 Session 导入前做结构和碰撞检查；restore 在公开宿主导入并冷验证后读取实际目标 Session，验证 accepted source 和候选 ref，拒绝凭 receipt 制造历史。
 
+`exportState({sessionIds, additionalProfileRefs?:[{profileId,version}]})` 可额外保留选定资产尚未采用的精确文风版本及其原 source，默认空数组，并与当前依赖去重。library-only profile 保持原有 draft/ready 状态，恢复不会自动绑定或启用；显式选择 builtin 的当前 binding 不变。缺少请求版本时返回 `EXPORT_REQUIREMENT_MISSING` 并给出安全引用，不替换成 latest，也不从任意 provenance 或全库推断依赖。返回仍为 `{schemaVersion:1,revision,payload}`，revision 使用 aggregate 内容域。
+
 恢复 gate 拒绝新的 LastStep 操作／admission，drain 已有 writer、候选、canonical handler 及 store 队列。staging 保留自身 root 的无关数据；外置 `.rp-last-step-owner.json` 先记 intent，再分两次目录 rename。两步是可恢复提交，不宣称单 OS 原子动作；启动先恢复，再打开 handles／缓存。进程内读取看到完整状态或 busy，不承诺任意外部文件读者的原子视图。
 
 contentRevision 是 preset/receipt/draft/restore 的持久 aggregate，写前 reserve generation，稳定读取等待短 storage gate。旧 state.revision 和预设编辑 expectedRevision 仍属 preset-local 域；新 importContent/restoreState 在同一 gate 比较 aggregate，不能混用两域。requestId 异 payload 返回 REQUEST_ID_CONFLICT；restoreId 异 payload／Session 集合返回 RESTORE_ID_CONFLICT。同 payload 重试复用映射。StoryKit 负责 Session／跨插件协调，本插件不写其他状态所有者。

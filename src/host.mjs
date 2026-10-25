@@ -386,10 +386,11 @@ export async function createRpLastStepHost(ctx, options = {}) {
     ensureBuiltinProfile:input=>run(input.signal,async()=>{const result=await store.ensureBuiltinProfile(input);await refreshBindings();changed();return result;}),
     contentRevision:({signal}={})=>run(signal,()=>ownerState.read(revision=>({revision}))),
     async exportState(input){
-      const ids=sessionSet(input.sessionIds);
+      const ids=sessionSet(input.sessionIds),refs=input.additionalProfileRefs===undefined?[]:copy(input.additionalProfileRefs);
+      if(!Array.isArray(refs)||refs.some(ref=>!object(ref)||Object.keys(ref).length!==2||typeof ref.profileId!=='string'||!ref.profileId.trim()||ref.profileId.length>256||!Number.isSafeInteger(ref.version)||ref.version<1))throw new PresetError('INVALID_PROFILE','Additional profile references require only profileId and a positive integer version');
       for(const id of ids){const snapshot=await canonicalSession(id,undefined,input.signal);if(snapshot.header.parentSession&&!await store.binding(id)&&await store.binding(snapshot.header.parentSession))await service.inheritSession({parentSessionId:snapshot.header.parentSession,sessionId:id,signal:input.signal});}
       return exclusive(ids,input.signal,'export',async signal=>{
-        const sessions=await sessionFamily(ids,signal),captured=await ownerState.read(async revision=>({revision,raw:await readOwnedState(directory)})),payload=selectState(captured.raw,ids,sessions);validateCanonicalState(payload,sessions);
+        const sessions=await sessionFamily(ids,signal),captured=await ownerState.read(async revision=>({revision,raw:await readOwnedState(directory)})),payload=selectState(captured.raw,ids,sessions,refs);validateCanonicalState(payload,sessions);
         return{schemaVersion:1,revision:captured.revision,payload};
       });
     },

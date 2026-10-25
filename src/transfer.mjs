@@ -37,7 +37,7 @@ function sourceIn(receipt,snapshot){
 function descended(snapshot,ancestor,sessions){
   const seen=new Set();while(snapshot?.header.parentSession){if(seen.has(snapshot.header.id))return false;seen.add(snapshot.header.id);const parent=sessions.get(snapshot.header.parentSession),count=snapshot.inheritedEventCount;if(!parent||!Number.isSafeInteger(count)||count<0||count>parent.events.length||count>snapshot.events.length||!isDeepStrictEqual(snapshot.events.slice(0,count),parent.events.slice(0,count)))return false;if(parent.header.id===ancestor)return true;snapshot=parent;}return false;
 }
-export function selectState(raw,sessionIds,sessions){
+export function selectState(raw,sessionIds,sessions,additionalProfileRefs=[]){
   const receipts=new Map(),profiles=new Map(),sources=new Map(),bindings={},drafts={};
   for(const sessionId of sessionIds){
     const snapshot=sessions.get(sessionId);if(!snapshot||!Number.isSafeInteger(snapshot.inheritedEventCount)||snapshot.inheritedEventCount<0)throw new PresetError('EXPORT_SOURCE_METADATA_MISSING','Authoritative Session seed metadata is required',409);
@@ -48,9 +48,10 @@ export function selectState(raw,sessionIds,sessions){
     }}
     for(const [draftId,versions] of Object.entries(raw.drafts.drafts))if(versions.at(-1)?.sessionId===sessionId){put(drafts,draftId,structuredClone(versions));for(const draft of versions){const receipt=raw.receipts[draft.basedOn?.presentationId];if(!receipt)throw new PresetError('RESTORE_REQUIREMENT_MISSING','A candidate requires its original frozen receipt',409);receipts.set(receipt.id,receipt);}}
   }
-  const addProfile=(profileId,version)=>{const profile=get(raw.presets.profiles,profileId)?.find(item=>item.version===version);if(!profile)throw new PresetError('RESTORE_REQUIREMENT_MISSING','A pinned LastStep profile version is unavailable',409);profiles.set(JSON.stringify([profileId,version]),profile);if(profile.sourceId!==null){const source=get(raw.presets.sources,profile.sourceId);if(!source)throw new PresetError('RESTORE_REQUIREMENT_MISSING','An immutable preset source is unavailable',409);sources.set(source.id,source);}};
+  const addProfile=(profileId,version,code='RESTORE_REQUIREMENT_MISSING')=>{const key=JSON.stringify([profileId,version]),profile=get(raw.presets.profiles,profileId)?.find(item=>item.version===version);if(!profile)throw new PresetError(code,`A pinned LastStep profile version is unavailable: ${key}`,409);profiles.set(key,profile);if(profile.sourceId!==null){const source=get(raw.presets.sources,profile.sourceId);if(!source)throw new PresetError(code,`An immutable preset source is unavailable for profile: ${key}`,409);sources.set(source.id,source);}};
   for(const binding of Object.values(bindings))addProfile(binding.profileId,binding.version);for(const receipt of receipts.values()){addProfile(receipt.profileId,receipt.profileVersion);if(receipt.rewriteOf&&!receipts.has(receipt.rewriteOf)){const original=raw.receipts[receipt.rewriteOf];if(!original)throw new PresetError('RESTORE_REQUIREMENT_MISSING','A retry requires its failed source receipt',409);receipts.set(original.id,original);}}
   for(const receipt of receipts.values())addProfile(receipt.profileId,receipt.profileVersion);
+  for(const ref of additionalProfileRefs)addProfile(ref.profileId,ref.version,'EXPORT_REQUIREMENT_MISSING');
   return structuredClone({sessionIds:[...sessionIds],sources:[...sources.values()],profiles:[...profiles.values()],bindings,receipts:[...receipts.values()],drafts});
 }
 function validate(payload,raw,sessionIds){

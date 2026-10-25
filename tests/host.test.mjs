@@ -404,6 +404,44 @@ test('state transfer preserves exact required profiles, receipts and drafts whil
   assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:changed})).supported,false);assert.equal((await destination.host.contentRevision()).revision,restored.revision);
 });
 
+test('additional pinned draft profiles restore as exact library-only content while the current builtin binding stays unchanged',async t=>{
+  const source=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async()=>({factReceipt:{id:'fact-builtin',kind:'opening',openingText:'Builtin story opening.'},packet:{playerAction:'Begin.'}})}}});
+  const builtin=await source.host.ensureBuiltinProfile({key:'gm-builtin.v1',profile:{name:'GM builtin',entries:ready().entries}});
+  await source.host.bindSession({sessionId:'story',...builtin,expectedRevision:(await source.host.state('story')).revision});
+  const rawText='{ "name":"StyleV1", "prompts":[{"identifier":"style","content":"Pinned draft style."}], "extensions":{"profileRef":{"profileId":"unrelated","version":1}} }';
+  const imported=await source.host.importSillyTavern({rawText,expectedRevision:(await source.host.state('story')).revision}),style=(await source.host.profile({profileId:imported.profileId,version:1})).profile;
+  await source.host.saveProfile({profile:{...style,entries:style.entries.map(item=>({...item,content:'Later style version.'}))},expectedRevision:(await source.host.state('story')).revision});
+  await source.host.saveProfile({profile:{...ready(),id:'unrelated'},expectedRevision:(await source.host.state('story')).revision});
+  const opening=await source.host.present({sessionId:'story',agent:source.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',factReceiptId:'fact-builtin'}),events=acceptedEvents(opening);
+  source.agents.get('story').session.snapshotEvents=()=>events;await source.host.commit({sessionId:'story',presentationId:opening.id,seq:5});
+  const before=await source.host.state('story'),revision=await source.host.contentRevision(),ordinary=await source.host.exportState({sessionIds:['story']});
+  assert.deepEqual(await source.host.exportState({sessionIds:['story'],additionalProfileRefs:[]}),ordinary);assert.equal(ordinary.payload.profiles.length,1);
+  const refs=[{profileId:style.id,version:1},{profileId:style.id,version:1},{profileId:builtin.profileId,version:builtin.version}],pending=source.host.exportState({sessionIds:['story'],additionalProfileRefs:refs});
+  refs[0].version=2;refs.push({profileId:'unrelated',version:1});const state=await pending;
+  assert.deepEqual(Object.keys(state),['schemaVersion','revision','payload']);assert.equal(state.schemaVersion,1);assert.equal(state.revision,revision.revision);assert.ok(state.revision>before.revision);
+  assert.deepEqual(state.payload.profiles.map(profile=>[profile.id,profile.version,profile.status]).sort(),[[builtin.profileId,1,'ready'],[style.id,1,'draft']].sort());
+  assert.equal(state.payload.sources.length,1);assert.equal(state.payload.sources[0].rawText,rawText);assert.equal(state.payload.sources[0].id,style.sourceId);
+  assert.deepEqual((await source.host.state('story')).binding,before.binding);assert.deepEqual(await source.host.contentRevision(),revision);assert.equal(source.calls.length,0);
+  const destination=await fixture(t);destination.agents.get('story').session.snapshotEvents=()=>events;
+  assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state})).supported,true);
+  await destination.host.restoreState({restoreId:'pinned-style-default',sessionIds:['story'],state,expectedRevision:(await destination.host.contentRevision()).revision});
+  assert.deepEqual((await destination.host.profile({profileId:style.id,version:1})).profile,style);assert.equal((await destination.host.source({sourceId:style.sourceId})).source.rawText,rawText);
+  await assert.rejects(destination.host.profile({profileId:style.id,version:2}),{code:'PROFILE_NOT_FOUND'});await assert.rejects(destination.host.profile({profileId:'unrelated',version:1}),{code:'PROFILE_NOT_FOUND'});
+  assert.deepEqual((await destination.host.state('story')).binding,before.binding);assert.equal(destination.calls.length,0);
+});
+
+test('additional pinned profile export fails explicitly for a missing exact version without using latest or changing state',async t=>{
+  const f=await fixture(t);await bind(f);const before=await f.host.state('story'),revision=await f.host.contentRevision();
+  for(const ref of [{profileId:'preset',version:99},{profileId:'absent',version:1}])await assert.rejects(f.host.exportState({sessionIds:['story'],additionalProfileRefs:[ref]}),error=>error.code==='EXPORT_REQUIREMENT_MISSING'&&error.message.includes(JSON.stringify([ref.profileId,ref.version])));
+  assert.deepEqual(await f.host.contentRevision(),revision);assert.deepEqual(await f.host.state('story'),before);assert.equal(f.calls.length,0);
+});
+
+test('additional profile refs require an exact typed profileId and positive integer version before export work',async t=>{
+  const f=await fixture(t);const before=f.remoteCalls.length;
+  for(const additionalProfileRefs of [null,{},[{profileId:'preset'}],[{profileId:'preset',version:0}],[{profileId:'preset',version:1,sourceId:'inert'}]])await assert.rejects(f.host.exportState({sessionIds:['story'],additionalProfileRefs}),{code:'INVALID_PROFILE'});
+  assert.equal(f.remoteCalls.length,before);assert.equal((await f.host.contentRevision()).revision,0);
+});
+
 test('restore rejects a successful retry child downgraded to failed or cancelled without reopening its family',async t=>{
   const source=await fixture(t,{stages:[{commit:true},new Error('Writer unavailable'),'Accepted retry prose.']});await bind(source);
   const firstContext='["story","assistant-1","call-1"]';
