@@ -1,4 +1,6 @@
 // Deterministic native LastStep fixture; optional Context is a contracted test double.
+import fs from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
 export const name='last-step-drafts-probe';
 export const inject=['llm','agents','tools','connection','typertGateway','sessionQuery','sessionPersistence','agentPresets'];
 const textOf=message=>(message?.content??[]).filter(block=>block.type==='text').map(block=>block.text).join('\n');
@@ -6,6 +8,20 @@ async function* textChunks(text){yield{type:'text-delta',index:0,text};yield{typ
 async function* toolChunks(name,args){yield{type:'block-start',index:0,blockType:'tool-call'};yield{type:'tool-call-delta',index:0,id:'reused-call',name,argumentsDelta:JSON.stringify(args)};yield{type:'block-end',index:0,block:{type:'tool-call',id:'reused-call',name,arguments:JSON.stringify(args)}};yield{type:'finish',reason:{kind:'tool-calls'}};}
 export function apply(ctx){
   const counts={facts:0,main:0,writer:0,assembly:0,context:0},failed=new Set(),handles=[];let retryMode='proper';
+  let adoptionGate;
+  const restoreRead=()=>{if(adoptionGate?.originalRead){fs.promises.readFile=adoptionGate.originalRead;syncBuiltinESMExports();adoptionGate.originalRead=null;}};
+  function armAdoptionGate(){
+    if(adoptionGate?.originalRead)throw Error('An adoption read gate is already armed');
+    let release,entered;const gate={reads:[],held:false,release:()=>release(),ready:new Promise(done=>{entered=done;}),wait:new Promise(done=>{release=done;}),originalRead:fs.promises.readFile};adoptionGate=gate;
+    fs.promises.readFile=async function(...args){
+      const selected=String(args[0]).replaceAll('\\','/').endsWith('/rp-last-step/drafts/drafts.json'),index=selected?gate.reads.push(new Error().stack.split('\n').slice(1,5)):0;
+      const value=await gate.originalRead(...args);
+      // With no prose panel mounted, adoption performs initial get, pre-step get,
+      // then withVersion's final read. Pause its real I/O return, not product code.
+      if(index===3){gate.held=true;entered();try{await gate.wait;}finally{restoreRead();}}
+      return value;
+    };syncBuiltinESMExports();
+  }
   const invoke=(method,request,signal)=>ctx.typertGateway.invoke({namespace:'session',method,args:{request},peer:ctx.connection.browserPeer,signal});
   ctx.tools.register({name:'lsb_fact',description:'One local deterministic factual action',parameters:{type:'object',properties:{},additionalProperties:false},output:{schema:{type:'object'},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},execute:async()=>({count:++counts.facts,outcome:'The gate remains closed.'})});
   ctx.provide('rpContext',{prepare:async input=>{counts.context++;return{id:'frozen-'+input.presentationId,authorNote:{id:'synthetic-note',version:1,claimId:input.presentationId},candidates:[{key:'world:gate',ref:{sourceKey:'world',entryId:'gate'},title:'The gate',version:1,mode:'required',readOnly:true}],materials:{entries:[{ref:{sourceKey:'world',entryId:'gate'},id:'gate',version:1,content:'The gate remains closed.'}],history:[],recentProse:[],guidance:'Owner writing guidance: preserve the fixed failure.',chars:96},models:{}};},presentationOutcome:async()=>{}});
@@ -40,8 +56,12 @@ export function apply(ctx){
         const profile=await last.ensureBuiltinProfile({key:'last-step-native-probe.v1',profile:{name:'Synthetic native prose',entries:[{id:'style',content:'Write concise public prose, preserving the gate failure.',phase:'render',role:'system',required:true,locked:true}]}});
         await last.bindSession({sessionId:value.sessionId,...profile,expectedRevision:(await last.state(value.sessionId)).revision});
       }else if(input.action==='run'){await invoke('prompt',{sessionId:input.sessionId,requestId:crypto.randomUUID(),mode:'queue',content:[{type:'text',text:input.text}]},request.signal);await ctx.agents.get(input.sessionId).whenIdle();value=await snapshot(input.sessionId);}
+      else if(input.action==='armAdoptionGate'){armAdoptionGate();value={armed:true};}
+      else if(input.action==='awaitAdoptionGate'){await Promise.race([adoptionGate.ready,new Promise((_resolve,reject)=>setTimeout(()=>reject(Error('Final adoption read did not pause')),10000))]);value={held:adoptionGate.held,reads:adoptionGate.reads};}
+      else if(input.action==='cancelAdoptionGate'){if(!adoptionGate?.held)throw Error('Final adoption read is not held');const agent=ctx.agents.get(input.sessionId);agent.cancel({kind:'user'},{keepInbox:true});adoptionGate.release();await agent.whenIdle();value=await snapshot(input.sessionId);}
       else if(input.action==='snapshot')value=await snapshot(input.sessionId);
       else if(input.action==='stats')value={...counts};
+      else if(input.action==='contentRevision')value=await last.contentRevision();
       else if(input.action==='retryMode'){retryMode=input.mode;value={retryMode};}
       else if(input.action==='fork'){value=await invoke('fork',{sessionId:input.sessionId,atSeq:input.atSeq},request.signal);if(typeof last.inheritSession==='function')await last.inheritSession({parentSessionId:input.sessionId,sessionId:value.sessionId,signal:request.signal});}
       else if(input.action==='exportState')value=await last.exportState({sessionIds:input.sessionIds,signal:request.signal});
@@ -52,5 +72,5 @@ export function apply(ctx){
       else throw Error('Unknown fixture action');return Response.json(value);
     }catch(error){return Response.json({error:{message:error.message,code:error.code,stack:error.stack}},{status:500});}
   }});
-  ctx.effect(()=>async()=>{for(const handle of handles)await handle.dispose();},'native fixture handles');
+  ctx.effect(()=>async()=>{adoptionGate?.release();restoreRead();for(const handle of handles)await handle.dispose();},'native fixture handles');
 }

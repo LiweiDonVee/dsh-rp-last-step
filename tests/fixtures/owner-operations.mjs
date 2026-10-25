@@ -7,7 +7,7 @@ export function ownerFixture(options={}){
   async function waterfall(name,payload){const handlers=[...listeners.get(name)??[]];const next=index=>handlers[index]?handlers[index](payload,()=>next(index+1)):Promise.resolve({kind:'enter',messages:payload.messages});return next(0);}
   const append=(type,data,intent={})=>{const event={seq:events.at(-1).seq+1,type,data:structuredClone(data),...intent};events.push(event);return event;};
   const agent={id:'story',status:'idle',session:{id:'story',snapshotEvents:()=>structuredClone(events),append},ctx:{tools:{guard(fn){guards.add(fn);return()=>guards.delete(fn);}}},
-    followup(message){agent.status='running';const abort=new AbortController();agent.cancel=()=>abort.abort();work=Promise.resolve().then(async()=>{
+    followup(message){agent.status='running';const abort=new AbortController();agent.cancel=reason=>abort.abort(reason);work=Promise.resolve().then(async()=>{
       await options.beforeStep?.();turn++;append('turn/start',{turn});
       let decision=await waterfall('agent/pre-step',{agent,turn,step:1,signal:abort.signal,messages:options.messages??[message]});
       if(decision.kind==='enter'&&!abort.signal.aborted){calls.push(decision.messages);await options.dispatch?.({agent,turn,message,guards,events});if(options.secondStep)decision=await waterfall('agent/pre-step',{agent,turn,step:2,signal:abort.signal,messages:[]});}

@@ -62,6 +62,21 @@ test('cancelling before owner pre-step changes no prose and releases every liste
   assert.equal(f.events.filter(event=>event.type==='tool/result').length,1);assert.equal(f.calls.length,0);assert.equal(f.hookCount(),0);assert.equal(f.guards.size,0);
 });
 
+for(const cancellation of ['request','turn','unload'])test(`cancelling ${cancellation} during the final draft gate cannot adopt and leaves subsequent operations usable`,async()=>{
+  let release,entered;const hold=new Promise(done=>{release=done;}),started=new Promise(done=>{entered=done;}),f=ownerFixture(),abort=new AbortController();
+  const operations=controller(f,{withDraftVersion:async(_input,work)=>{entered();await hold;return work();}});
+  const input={kind:'adopt',sessionId:'story',request:{expectedNarrative:baseRef()},signal:abort.signal},pending=operations.run(input);
+  const rejected=assert.rejects(pending,{name:'AbortError'});await started;
+  let closing;
+  if(cancellation==='request')abort.abort();else if(cancellation==='turn')f.agent.cancel({kind:'user'});else closing=operations.close();
+  release();await rejected;await closing;await f.agent.whenIdle();
+  assert.equal(f.events.filter(event=>event.type==='tool/result').length,1);assert.equal(readNarratives('story',f.events)[0].text,'The gate stays shut.');
+  assert.equal(f.events.at(-1).data.reason.kind,'aborted');assert.equal(f.calls.length,0);assert.equal(f.hookCount(),0);assert.equal(f.guards.size,0);
+  const next=cancellation==='unload'?controller(f):operations,result=await next.run({...input,signal:undefined});
+  assert.equal(result.result.kind,'success');assert.equal(readNarratives('story',f.events)[0].text,'Candidate wording.');
+  assert.equal(f.hookCount(),0);assert.equal(f.guards.size,0);await next.close();
+});
+
 test('unload waits for a cancelled command handler even when its caller already received abort',async()=>{
   let release;const hold=new Promise(done=>{release=done;}),f=ownerFixture({beforeStep:()=>hold}),operations=controller(f),invoke=f.ctx.typertGateway.invoke;
   f.ctx.typertGateway.invoke=request=>Promise.race([invoke(request),new Promise((_resolve,reject)=>request.signal.addEventListener('abort',()=>reject(new DOMException('Cancelled','AbortError')),{once:true}))]);

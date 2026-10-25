@@ -173,6 +173,14 @@ function acceptedEvents(result){
   return events;
 }
 
+function retryEvents(result,rewriteOf){
+  const events=acceptedEvents(result).slice(1).map(event=>({...event,seq:event.seq+6}));
+  for(const event of events)if(event.data.turn!==undefined)event.data.turn=2;
+  events[2].data.message.id='assistant-retry';events[2].data.message.content[0]={type:'tool-call',id:'call-retry',name:'rp_present',arguments:JSON.stringify({rewriteOf})};
+  events[3].data.callId='call-retry';events[3].data.arguments=events[2].data.message.content[0].arguments;
+  events[4].sourceEventSeqs=[10];events[4].data.message.source.callId='call-retry';events[4].data.message.toolCallId='call-retry';return events;
+}
+
 test('a completed identical fact context replays before the strict GM resolver',async t=>{
   let gmCalls=0;const contextKey='["story","assistant-1","call-1"]';
   const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async input=>{gmCalls++;if((await f.host.narratives({sessionId:input.sessionId,agent:input.agent})).records.some(record=>record.factReceiptId===input.factReceiptId))throw new PresetError('FACT_ALREADY_PRESENTED','Already formal',409);return{factReceipt:{id:input.factReceiptId,kind:'opening',openingText:'Exact opening.'},packet:{playerAction:'Begin.'},story:{title:'The Gate'}};}}}});await bind(f);
@@ -394,6 +402,64 @@ test('state transfer preserves exact required profiles, receipts and drafts whil
   await assert.rejects(destination.host.restoreState({restoreId:'restore-one',sessionIds:['story','other'],state,expectedRevision:restored.revision}),{code:'RESTORE_ID_CONFLICT'});
   const changed=structuredClone(state);changed.payload.receipts[0].text='Forged accepted body.';await assert.rejects(destination.host.restoreState({restoreId:'restore-one',sessionIds:['story'],state:changed,expectedRevision:restored.revision}),{code:'RESTORE_ID_CONFLICT'});
   assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:changed})).supported,false);assert.equal((await destination.host.contentRevision()).revision,restored.revision);
+});
+
+test('restore rejects a successful retry child downgraded to failed or cancelled without reopening its family',async t=>{
+  const source=await fixture(t,{stages:[{commit:true},new Error('Writer unavailable'),'Accepted retry prose.']});await bind(source);
+  const firstContext='["story","assistant-1","call-1"]';
+  await assert.rejects(source.host.present({sessionId:'story',agent:source.agents.get('story'),contextKey:firstContext,packet}));
+  const failed=(await source.host.state('story')).presentations[0],events=acceptedEvents(failed);
+  events[5].data.message.isError=true;delete events[5].data.meta;source.agents.get('story').session.snapshotEvents=()=>events;
+  assert.equal((await source.host.presentationSummaries({sessionId:'story'})).presentations[0].canRetry,true);
+  events.push(...retryEvents({text:''},failed.id).slice(0,4));
+  const retry=await source.host.present({sessionId:'story',agent:source.agents.get('story'),contextKey:'["story","assistant-retry","call-retry"]',rewriteOf:failed.id});
+  events.push(...retryEvents(retry,failed.id).slice(4));
+  await source.host.commit({sessionId:'story',presentationId:retry.id,seq:11});
+  const state=await source.host.exportState({sessionIds:['story']}),destination=await fixture(t);
+  destination.agents.get('story').session.snapshotEvents=()=>events;
+  await destination.host.saveProfile({profile:{...ready(),id:'destination-keep'},expectedRevision:0});
+  const before=await destination.host.contentRevision();
+  for(const status of ['failed','cancelled']){
+    const downgraded=structuredClone(state);downgraded.payload.receipts.find(receipt=>receipt.id===retry.id).status=status;
+    // T2 preflight is structural; canonical proof belongs to restore after logs exist.
+    assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:downgraded})).supported,true);
+    await assert.rejects(destination.host.restoreState({restoreId:`downgraded-${status}`,sessionIds:['story'],state:downgraded,expectedRevision:before.revision}),{code:'RESTORE_PAYLOAD_INVALID'});
+    assert.deepEqual(await destination.host.contentRevision(),before);assert.deepEqual((await destination.host.state('story')).presentations,[]);
+    assert.equal((await destination.host.state('story')).profiles.length,1);assert.ok(await destination.store.profile('destination-keep',1));
+  }
+  await destination.host.restoreState({restoreId:'valid-success',sessionIds:['story'],state,expectedRevision:before.revision});
+  const summaries=(await destination.host.presentationSummaries({sessionId:'story'})).presentations;
+  assert.equal(summaries.find(record=>record.presentationId===failed.id).retryBlockCode,'REWRITE_ALREADY_RENDERED');
+  assert.equal(summaries.find(record=>record.presentationId===retry.id).canRetry,false);
+  await assert.rejects(destination.host.retryPresentation({sessionId:'story',presentationId:failed.id}),{code:'REWRITE_ALREADY_RENDERED'});assert.equal(destination.calls.length,0);
+});
+
+for(const status of ['failed','cancelled'])test(`restored legitimate ${status} frozen material can still retry without assembly or Context`,async t=>{
+  const error=status==='cancelled'?new DOMException('Writer cancelled','AbortError'):new Error('Writer unavailable');
+  const source=await fixture(t,{stages:[{commit:true},error]});await bind(source);
+  await assert.rejects(source.host.present({sessionId:'story',agent:source.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',packet}));
+  const failed=(await source.host.state('story')).presentations[0],events=acceptedEvents(failed);
+  assert.equal(failed.status,status);events[5].data.message.isError=true;delete events[5].data.meta;source.agents.get('story').session.snapshotEvents=()=>events;
+  const state=await source.host.exportState({sessionIds:['story']}),destination=await fixture(t,{stages:['Restored writer-only retry.'],services:{rpContext:{prepare:()=>{throw Error('Context must not rerun');}}}});
+  destination.agents.get('story').session.snapshotEvents=()=>events;
+  await destination.host.restoreState({restoreId:`valid-${status}`,sessionIds:['story'],state,expectedRevision:(await destination.host.contentRevision()).revision});
+  assert.equal((await destination.host.presentationSummaries({sessionId:'story'})).presentations[0].canRetry,true);
+  events.push(...retryEvents({text:''},failed.id).slice(0,4));
+  const retry=await destination.host.present({sessionId:'story',agent:destination.agents.get('story'),contextKey:'["story","assistant-retry","call-retry"]',rewriteOf:failed.id});
+  assert.equal(retry.text,'Restored writer-only retry.');assert.equal(retry.rewriteOf,failed.id);assert.equal(destination.calls.length,1);
+  assert.deepEqual((await destination.host.material({sessionId:'story',presentationId:retry.id})).compiled,(await source.host.material({sessionId:'story',presentationId:failed.id})).compiled);
+});
+
+test('restore preserves canonical accepted rendered receipts for identical R12 replay without resolving GM again',async t=>{
+  const source=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async()=>({factReceipt:{id:'fact-restore-lag',kind:'opening',openingText:'Accepted opening.'},packet:{playerAction:'Begin.'}})}}});await bind(source);
+  const request={sessionId:'story',contextKey:'["story","assistant-1","call-1"]',factReceiptId:'fact-restore-lag'},first=await source.host.present({...request,agent:source.agents.get('story')}),events=acceptedEvents(first);
+  source.agents.get('story').session.snapshotEvents=()=>events;
+  const state=await source.host.exportState({sessionIds:['story']});assert.equal(state.payload.receipts[0].status,'rendered');
+  let gmCalls=0;const destination=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:()=>{gmCalls++;throw Error('Strict GM must not resolve an accepted fact');}}}});
+  destination.agents.get('story').session.snapshotEvents=()=>events;
+  await destination.host.restoreState({restoreId:'valid-rendered-lag',sessionIds:['story'],state,expectedRevision:(await destination.host.contentRevision()).revision});
+  const replay=await destination.host.present({...request,agent:destination.agents.get('story')});
+  assert.equal(replay.id,first.id);assert.equal(replay.status,'complete');assert.equal(gmCalls,0);assert.equal(destination.calls.length,0);
 });
 
 test('export drains an in-flight candidate and rejects new owner work while capturing stable state',async t=>{

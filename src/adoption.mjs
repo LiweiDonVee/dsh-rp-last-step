@@ -53,6 +53,7 @@ export function createOwnerOperations(ctx,{prepare,complete,withDraftVersion=(_i
             const current=events.find(event=>event.seq===ref.resultSeq);
             if(!current)throw new PresetError('NARRATIVE_CONFLICT','The selected narrative changed before adoption',409);
             const data=structuredClone(current.data);data.message.content=[{type:'text',text:prepared.text}];
+            if(signal.aborted||proposal.signal.aborted)throw new DOMException('Owner operation cancelled','AbortError');
             return agent.session.append('tool/result',data,{surfaceOp:{op:'replace',startSeq:current.seq,endSeq:current.seq},sourceEventSeqs:[ref.callSeq,current.seq]}).seq;
           });
           return{kind:'reject'};

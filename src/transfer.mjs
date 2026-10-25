@@ -82,10 +82,16 @@ export function validateCanonicalState(payload,sessions){
     const candidates=[...sessions.values()].filter(snapshot=>snapshot.header.id===receipt.sessionId||descended(snapshot,receipt.sessionId,sessions));
     if(!candidates.length)throw new PresetError('RESTORE_REQUIREMENT_MISSING','The original receipt Session or inherited ancestry is missing',409);
     requireValue(candidates.some(snapshot=>sourceIn(receipt,snapshot)));
-    if(receipt.status==='complete')requireValue(candidates.some(snapshot=>snapshot.events.some(event=>{
+    const accepted=candidates.flatMap(snapshot=>snapshot.events.filter(event=>{
       const envelope=event.type==='tool/result'&&event.data?.meta?.rpLastStep,record=envelope?.record;
-      return envelope?.schemaVersion===1&&record?.id===receipt.id&&record.status==='complete'&&record.text===receipt.text&&record.factReceiptId===receipt.factReceiptId&&record.rewriteOf===receipt.rewriteOf&&readNarratives(snapshot.header.id,snapshot.events.filter(item=>item.seq<=event.seq)).some(narrative=>narrative.ref.presentationId===receipt.id);
-    })));
+      return envelope?.schemaVersion===1&&record?.id===receipt.id&&record.status==='complete'&&readNarratives(snapshot.header.id,snapshot.events.filter(item=>item.seq<=event.seq)).some(narrative=>narrative.ref.presentationId===receipt.id&&narrative.ref.baseResultSeq===event.seq);
+    }));
+    // Accepted history is authoritative even when the imported status denies success.
+    // A rendered receipt may legitimately lag canonical completion bookkeeping.
+    if(accepted.length){
+      requireValue(['rendered','complete'].includes(receipt.status));
+      requireValue(accepted.some(event=>{const record=event.data.meta.rpLastStep.record;return record.text===receipt.text&&record.factReceiptId===receipt.factReceiptId&&record.rewriteOf===receipt.rewriteOf;}));
+    }else requireValue(receipt.status!=='complete');
   }
   for(const versions of Object.values(payload.drafts))for(const draft of versions){const snapshot=sessions.get(draft.sessionId);requireValue(snapshot&&readNarratives(draft.sessionId,snapshot.events.filter(event=>event.seq<=draft.basedOn.resultSeq)).some(record=>sameNarrativeRef(record.ref,draft.basedOn)));}
 }
