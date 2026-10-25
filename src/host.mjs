@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PresetError, compileProfile, createProfile, emptyOverlay, importSillyTavern } from './core.mjs';
 import { createPresetStore } from './store.mjs';
-import { createReceiptStore } from './receipts.mjs';
+import { createReceiptStore, publicReceipt } from './receipts.mjs';
 import { createModelCaller, resolveModelConfig } from './models.mjs';
 import { createPresenter } from './presenter.mjs';
 import { registerRpLastStepAgent, requireNativeTools, usesNativeTools } from './agent.mjs';
@@ -175,6 +175,19 @@ export async function createRpLastStepHost(ctx, options = {}) {
   function draftProgress(event){
     try{ctx.emit('rp-last-step/draft',event);}catch{/* Candidate observers do not own the writer. */}
     notify(event.sessionId,{type:'draft',...event});
+  }
+  async function completedFactReplay(input,agent,signal){
+    const previous=await receipts.findByContextKey(input.sessionId,input.contextKey);
+    if(!previous||!['rendered','complete'].includes(previous.status))return null;
+    if(previous.factReceiptId!==input.factReceiptId)throw new PresetError('INVALID_FACT_RECEIPT','This presentation context belongs to a different fact receipt',409);
+    const events=await narrativeEvents(input.sessionId,agent,signal);
+    if(!activePresentationContexts(input.sessionId,events).includes(input.contextKey))throw new PresetError('INACTIVE_SOURCE','The presentation source is no longer active',409);
+    const accepted=readNarratives(input.sessionId,events).find(record=>record.ref.presentationId===previous.id&&record.factReceiptId===input.factReceiptId&&JSON.stringify([input.sessionId,record.ref.assistantMessageId,events.find(event=>event.seq===record.ref.callSeq)?.data.callId])===input.contextKey);
+    if(!accepted){
+      if(previous.status==='complete')throw new PresetError('INACTIVE_SOURCE','The completed presentation has no active canonical source',409);
+      return null;
+    }
+    return previous.status==='complete'?publicReceipt(previous):presenter.commit({sessionId:input.sessionId,presentationId:previous.id,seq:accepted.ref.baseResultSeq});
   }
   function baseFor(id, supplied) {
     const agent = ctx.agents.get(id);
@@ -384,23 +397,27 @@ export async function createRpLastStepHost(ctx, options = {}) {
     present(input) {
       const captured = { sessionId: input.sessionId, contextKey: input.contextKey, packet: copy(input.packet), factReceiptId:input.factReceiptId,rewriteOf:input.rewriteOf,callId: input.callId };
       return run(input.signal, async (combined) => {
+        let dispatched=false;
         try {
           await bound(captured.sessionId, combined);
           let resolved;
           const gm=ctx.get?.('rpGM');
           if(captured.rewriteOf===undefined){
             if(captured.factReceiptId!==undefined){
+              const replay=await completedFactReplay(captured,input.agent,combined);
+              if(replay){if(captured.callId)presentations.set(callKey(captured.sessionId,captured.callId),replay.id);return replay;}
               if(!gm?.presentation)throw new PresetError('GM_UNAVAILABLE','The fact receipt service is unavailable',503);
               resolved=await gm.presentation({sessionId:captured.sessionId,agent:input.agent??ctx.agents.get(captured.sessionId),factReceiptId:captured.factReceiptId,signal:combined});
               if(resolved.factReceipt.id!==captured.factReceiptId)throw new PresetError('INVALID_FACT_RECEIPT','The resolved fact receipt does not match',409);
             }else if(await gm?.binding?.({sessionId:captured.sessionId,signal:combined}))throw new PresetError('FACT_RECEIPT_REQUIRED','This story requires its committed fact receipt before presentation',409);
           }
-          const result = captured.rewriteOf===undefined?await presenter.present({ sessionId: captured.sessionId, contextKey: captured.contextKey, packet: resolved?.packet??captured.packet,...(resolved?{factReceiptId:captured.factReceiptId,story:resolved.story,...resolved.factReceipt.kind==='opening'?{openingText:resolved.factReceipt.openingText}:{}}:{}),baseModel: baseFor(captured.sessionId, input.agent), signal: combined }):await presenter.rewrite({sessionId:captured.sessionId,contextKey:captured.contextKey,presentationId:captured.rewriteOf,baseModel:baseFor(captured.sessionId,input.agent),signal:combined});
+          const baseModel=baseFor(captured.sessionId,input.agent);dispatched=true;
+          const result = captured.rewriteOf===undefined?await presenter.present({ sessionId: captured.sessionId, contextKey: captured.contextKey, packet: resolved?.packet??captured.packet,...(resolved?{factReceiptId:captured.factReceiptId,story:resolved.story,...resolved.factReceipt.kind==='opening'?{openingText:resolved.factReceipt.openingText}:{}}:{}),baseModel, signal: combined }):await presenter.rewrite({sessionId:captured.sessionId,contextKey:captured.contextKey,presentationId:captured.rewriteOf,baseModel,signal:combined});
           if (captured.callId) presentations.set(callKey(captured.sessionId, captured.callId), result.id);
           return result;
         } catch (error) {
           const receipt = await receipts.findByContextKey(captured.sessionId, captured.contextKey);
-          if (receipt && !['failed', 'cancelled', 'complete'].includes(receipt.status)) await presenter.fail({ sessionId: captured.sessionId, presentationId: receipt.id, error });
+          if (dispatched && receipt && !['failed', 'cancelled', 'complete'].includes(receipt.status)) await presenter.fail({ sessionId: captured.sessionId, presentationId: receipt.id, error });
           // Validation and route errors can precede receipt creation.
           if (!stopped && !receipt) await publish({ sessionId: captured.sessionId, stageId: 'rp-last-step.render', status: error?.name === 'AbortError' ? 'cancelled' : 'failed', code: error instanceof PresetError ? error.code : 'PRESENTATION_FAILED' });
           throw error;

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createPresetStore } from '../src/store.mjs';
+import {PresetError} from '../src/core.mjs';
 import * as module from '../src/host.mjs';
 import {baseEvents,replacement} from './fixtures/narrative-events.mjs';
 const entry = (id, content, extra = {}) => ({ id, name: id, content, role: 'system', order: 0, enabled: true, required: false, locked: false, phase: 'render', ...extra });
@@ -163,6 +164,63 @@ async function bind(f, profile = ready()) {
   const saved = await f.host.saveProfile({ profile, expectedRevision: (await f.store.snapshot()).revision });
   await f.host.bindSession({ sessionId: 'story', profileId: saved.profileId, version: saved.version, expectedRevision: saved.revision });
 }
+
+function acceptedEvents(result){
+  const events=baseEvents();
+  events[3].data.message.id='assistant-1';events[3].data.message.content[0]={type:'tool-call',id:'call-1',name:'rp_present',arguments:JSON.stringify({factReceiptId:result.factReceiptId})};
+  events[4].data.callId='call-1';events[4].data.arguments=events[3].data.message.content[0].arguments;
+  events[5].data.message.source.callId='call-1';events[5].data.message.toolCallId='call-1';events[5].data.message.content[0].text=result.text;events[5].data.meta.rpLastStep.record={...result,status:'complete'};
+  return events;
+}
+
+test('a completed identical fact context replays before the strict GM resolver',async t=>{
+  let gmCalls=0;const contextKey='["story","assistant-1","call-1"]';
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async input=>{gmCalls++;if((await f.host.narratives({sessionId:input.sessionId,agent:input.agent})).records.some(record=>record.factReceiptId===input.factReceiptId))throw new PresetError('FACT_ALREADY_PRESENTED','Already formal',409);return{factReceipt:{id:input.factReceiptId,kind:'opening',openingText:'Exact opening.'},packet:{playerAction:'Begin.'},story:{title:'The Gate'}};}}}});await bind(f);
+  const request={sessionId:'story',agent:f.agents.get('story'),contextKey,factReceiptId:'fact-once',callId:'call-1'},first=await f.host.present(request);
+  const events=acceptedEvents(first);f.agents.get('story').session.snapshotEvents=()=>events;await f.host.commit({sessionId:'story',presentationId:first.id,seq:5});
+  const replay=await f.host.present(request);
+  assert.equal(replay.id,first.id);assert.equal(replay.text,'Exact opening.');assert.equal(replay.status,'complete');assert.equal(replay.factReceiptId,'fact-once');assert.equal(gmCalls,1);assert.equal(f.calls.length,0);
+  events.push({seq:7,type:'user/message',surfaceOp:{op:'replace',startSeq:2,endSeq:5},sourceEventSeqs:[2,3,5],data:{source:{kind:'compact-checkpoint'}}});
+  assert.equal((await f.host.present(request)).id,first.id);assert.equal(gmCalls,1);
+  await assert.rejects(f.host.present({...request,factReceiptId:'different-fact'}),{code:'INVALID_FACT_RECEIPT'});assert.equal(gmCalls,1);
+  assert.equal((await f.host.state('story')).presentations.length,1);
+});
+
+test('canonical acceptance allows identical replay while receipt completion bookkeeping lags',async t=>{
+  let gmCalls=0;
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async input=>{gmCalls++;if((await f.host.narratives({sessionId:input.sessionId,agent:input.agent})).records.some(record=>record.factReceiptId===input.factReceiptId))throw new PresetError('FACT_ALREADY_PRESENTED','Already formal',409);return{factReceipt:{id:'fact-lag',kind:'turn'},packet,story:{title:'The Gate'}};}}}});await bind(f);
+  const request={sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',factReceiptId:'fact-lag'},first=await f.host.present(request);
+  assert.equal(first.status,'rendered');f.agents.get('story').session.snapshotEvents=()=>acceptedEvents(first);
+  await assert.rejects(f.host.present({...request,factReceiptId:'different-fact'}),{code:'INVALID_FACT_RECEIPT'});
+  assert.equal((await f.host.material({sessionId:'story',presentationId:first.id})).status,'rendered');
+  const replay=await f.host.present(request);
+  assert.equal(replay.id,first.id);assert.equal(replay.status,'complete');assert.equal(gmCalls,1);assert.equal(f.calls.length,2);assert.equal((await f.host.state('story')).presentations.length,1);
+});
+
+test('a new context still reaches the strict GM rule against duplicate formal facts',async t=>{
+  let gmCalls=0;
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm',status:'starting'}),presentation:async input=>{gmCalls++;if((await f.host.narratives({sessionId:input.sessionId,agent:input.agent})).records.some(record=>record.factReceiptId===input.factReceiptId))throw new PresetError('FACT_ALREADY_PRESENTED','Already formal despite a lagging story flag',409);return{factReceipt:{id:'fact-once',kind:'opening',openingText:'Only one opening.'},packet:{playerAction:'Begin.'}};}}}});await bind(f);
+  const request={sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',factReceiptId:'fact-once'},first=await f.host.present(request);
+  f.agents.get('story').session.snapshotEvents=()=>acceptedEvents(first);await f.host.commit({sessionId:'story',presentationId:first.id,seq:5});
+  await assert.rejects(f.host.present({...request,contextKey:'["story","new-assistant","new-call"]'}),{code:'FACT_ALREADY_PRESENTED'});
+  assert.equal(gmCalls,2);assert.equal(f.calls.length,0);assert.equal((await f.host.state('story')).presentations.length,1);
+});
+
+test('rewound complete fact contexts cannot replay archived prose or bypass active source checks',async t=>{
+  let gmCalls=0,sourceActive=true;
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async()=>{gmCalls++;if(!sourceActive)throw new PresetError('INACTIVE_SOURCE','Source was rewound',409);return{factReceipt:{id:'fact-old',kind:'opening',openingText:'Archived opening.'},packet:{playerAction:'Begin.'}};}}}});await bind(f);
+  const request={sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',factReceiptId:'fact-old'},first=await f.host.present(request),events=acceptedEvents(first);
+  f.agents.get('story').session.snapshotEvents=()=>events;await f.host.commit({sessionId:'story',presentationId:first.id,seq:5});
+  events.push({seq:7,type:'user/message',surfaceOp:{op:'replace',startSeq:2,endSeq:5},data:{source:{kind:'runtime-context'}}});sourceActive=false;
+  await assert.rejects(f.host.present(request),{code:'INACTIVE_SOURCE'});
+  assert.equal(gmCalls,1);assert.equal(f.calls.length,0);assert.equal((await f.host.material({sessionId:'story',presentationId:first.id})).status,'complete');
+});
+
+test('fresh superseded fact receipt errors propagate without creating presentation work',async t=>{
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async()=>{throw new PresetError('FACT_RECEIPT_SUPERSEDED','A later accepted factual receipt supersedes this one',409);}}}});await bind(f);
+  await assert.rejects(f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'new-context',factReceiptId:'older-unresolved'}),{code:'FACT_RECEIPT_SUPERSEDED'});
+  assert.equal(f.calls.length,0);assert.deepEqual((await f.host.state('story')).presentations,[]);
+});
 
 test('GM opening receipt uses exact owner prose through the terminal receipt without any model call',async t=>{
   const factReceipt={schemaVersion:1,id:'fact-opening',kind:'opening',openingText:'  Exact opening.\nOwner-selected.  ',packet:{playerAction:'Begin the story.'}};
