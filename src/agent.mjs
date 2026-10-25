@@ -131,21 +131,22 @@ export function registerRpLastStepAgent(ctx, service) {
     add({
       name: 'rp_present',
       description: 'After all simulation and tool results are resolved, submit only player-visible facts for isolated final prose. Call this alone in a new tool-call message; successful presentation ends the turn.',
-      parameters: schema({ packet: schema({
+      parameters: {...schema({ packet: schema({
         playerAction: string, sceneInstruction: string, resolvedChanges: strings, visibleConsequences: strings,
         openHooks: strings, proseConstraints: strings, publicFactRefs: strings, variables: { type: 'object' },
-      }, ['playerAction']) }, ['packet']),
+      }, ['playerAction']),rewriteOf:string }),oneOf:[{required:['packet']},{required:['rewriteOf']}]},
       output: {
         schema: { type: 'object', properties: { id: string, status: { type: 'string', enum: ['rendered', 'complete'] }, text: string }, required: ['id', 'status', 'text'] },
         render: (_args, value) => [{ type: 'text', text: value.text }],
         presentationMeta: (_args, value) => ({ rpLastStep: { schemaVersion: 1, record: { ...value, status: 'complete' } } }),
       },
       async execute(args, exec) {
-        argumentsFor(args, ['packet']);
+        argumentsFor(args, ['packet','rewriteOf']);
         const input = caller(service, exec);
         const contextKey = terminalContext(exec, input.sessionId);
-        const packet = normalizeDirectionPacket(args.packet);
-        const result = await service.present({ ...input, packet, contextKey, callId: exec.callId });
+        if((args.packet===undefined)===(args.rewriteOf===undefined)||args.rewriteOf!==undefined&&(typeof args.rewriteOf!=='string'||!args.rewriteOf.trim()))throw new PresetError('INVALID_TOOL_ARGUMENTS','Provide a packet or a failed frozen presentation to retry');
+        const request=args.rewriteOf===undefined?{packet:normalizeDirectionPacket(args.packet)}:{rewriteOf:args.rewriteOf};
+        const result = await service.present({ ...input, ...request, contextKey, callId: exec.callId });
         exec.signal.throwIfAborted();
         exec.concludeTurn();
         return result;
@@ -186,7 +187,7 @@ export function registerRpLastStepAgent(ctx, service) {
     }));
     for (const entry of [
       { name: 'rp-last-step-binding', order: 300, text: (context) => snapshot(context).bindingMarker },
-      { name: 'rp-last-step-workflow', order: 301, text: (context) => snapshot(context).enabled ? 'Resolve simulation and all tool results before final presentation. Preserve player control and authoritative outcomes. Manage only the bound session overlay through rp_last_step_catalog/read/patch; owner locks and required modules are enforced. Finish with rp_present as the sole direct tool call in a new assistant message, using only public facts and explicit variables. Wait for success; do not echo the resulting prose.' : '' },
+      { name: 'rp-last-step-workflow', order: 301, text: (context) => snapshot(context).enabled ? 'Resolve simulation and all tool results before final presentation. Preserve player control and authoritative outcomes. Manage only the bound session overlay through rp_last_step_catalog/read/patch; owner locks and required modules are enforced. Finish with rp_present as the sole direct tool call in a new assistant message, using only public facts and explicit variables. For an explicit prose-only retry, inspect catalog.presentations for canRetry and call rp_present with rewriteOf only; do not rerun settled facts or tools. Wait for success; do not echo the resulting prose.' : '' },
       { name: 'rp-last-step-agent', order: 302, text: (context) => snapshot(context).agentContext },
     ]) disposers.push(ctx.systemPrompt.context({ ...entry, required: true, interpolate: false }));
 

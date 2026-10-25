@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { PresetError } from './core.mjs';
 import { resolveModelConfig } from './models.mjs';
+import { retryEligibility } from './retry.mjs';
 
 const queues = new Map();
 const STATUSES = new Set(['prepared', 'assembling', 'rendering', 'rendered', 'complete', 'failed', 'cancelled']);
@@ -19,6 +20,11 @@ export function publicReceipt(value) {
   result.text = typeof value.text === 'string' ? value.text : '';
   if (record(value.models)) result.models = Object.fromEntries(Object.entries(value.models).map(([stage, config]) => [stage, resolveModelConfig(config)]));
   if (value.truncated === true) result.truncated = true;
+  if (typeof value.rewriteOf==='string') {result.rewriteOf=value.rewriteOf;result.playerAction=value.packet?.playerAction;}
+  if (record(value.contextPreparation)) {
+    const prepared=value.contextPreparation;
+    result.context={id:prepared.id,...prepared.database?{database:clone(prepared.database)}:{},history:(prepared.materials?.history??[]).map(item=>({id:item.id,mode:item.mode,source:clone(item.source)})),chars:prepared.materials?.chars,models:clone(prepared.models??{})};
+  }
   return result;
 }
 
@@ -71,12 +77,18 @@ export async function createReceiptStore({ directory } = {}) {
     indexFile(value.sessionId);
   }
   return Object.freeze({
-    async create(input) {
+    async create(input,options={}) {
       const captured = clone(input);
+      const contexts=clone(options.activeContexts);
       validate(captured);
       return serial(async () => {
-        if (captured.contextKey !== undefined && (await list(captured.sessionId)).some((value) => value.contextKey === captured.contextKey)) {
+        const existingRecords=await list(captured.sessionId);
+        if (captured.contextKey !== undefined && existingRecords.some((value) => value.contextKey === captured.contextKey)) {
           throw new PresetError('PRESENTATION_BUSY', 'This context already has a presentation attempt', 409);
+        }
+        if(captured.rewriteOf){
+          const original=existingRecords.find(record=>record.id===captured.rewriteOf),eligible=retryEligibility(existingRecords,original,contexts);
+          if(!eligible.canRetry||contexts!==undefined&&!new Set(contexts).has(captured.contextKey))throw new PresetError(eligible.canRetry?'REWRITE_SOURCE_INACTIVE':eligible.code,'The frozen presentation is not eligible for this retry',409);
         }
         const value = { ...captured, id: randomUUID(), createdAt: new Date().toISOString() };
         const index = indexFile(value.sessionId);

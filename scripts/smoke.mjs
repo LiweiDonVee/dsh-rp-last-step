@@ -9,7 +9,7 @@ const root=process.cwd(),home=resolve(`.runtime/rp-step-smoke-${Date.now()}`),ev
 await mkdir(home,{recursive:true});await mkdir(evidence,{recursive:true})
 // The fixture is a server-only plugin, not a second source for our client.
 await writeFile(join(home,'package.json'),JSON.stringify({name:'rp-last-step-smoke-home',private:true,type:'module'}))
-const artifact='artifacts/dsh-rp-last-step-0.1.0.tgz',hash=createHash('sha256').update(await readFile(artifact)).digest('hex')
+const artifact='artifacts/dsh-rp-last-step-0.2.0.tgz',hash=createHash('sha256').update(await readFile(artifact)).digest('hex')
 await writeFile(join(evidence,'acceptance.json'),JSON.stringify({passed:false,status:'running',hash}))
 const cli=process.env.DSH_BIN??join(process.env.LOCALAPPDATA,'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'),quote=value=>process.platform==='win32'?`"${value}"`:value
 const env={...process.env,DSH_HOME:home,DEEPSEEK_API_KEY:'rp-step-smoke-placeholder-unused'}

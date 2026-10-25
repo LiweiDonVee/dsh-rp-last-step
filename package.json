@@ -1,6 +1,6 @@
 {
   "name": "dsh-rp-last-step",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH RP 最后一步：SillyTavern 预设适配、模块热组装与独立呈现",
   "license": "MIT",
   "type": "module",
