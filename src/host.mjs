@@ -9,6 +9,7 @@ import { createModelCaller, resolveModelConfig } from './models.mjs';
 import { createPresenter } from './presenter.mjs';
 import { registerRpLastStepAgent, requireNativeTools, usesNativeTools } from './agent.mjs';
 import { createRpLastStepRoutes } from './routes.mjs';
+import { activePresentationContexts } from './retry.mjs';
 
 export const name = 'rp-last-step';
 export const inject = ['connection', 'typertGateway', 'agents', 'llm', 'tools', 'systemPrompt'];
@@ -199,6 +200,10 @@ export async function createRpLastStepHost(ctx, options = {}) {
     notify(event.sessionId, { ...event, type: 'stage' });
   }
   const presenter = createPresenter({ store, receipts, callModel, resolveModels, publish, skillText: skill.content, skillReference,
+    activeContexts:({sessionId})=>{
+      const session=ctx.agents.get(sessionId)?.session;
+      return session?.snapshotEvents?activePresentationContexts(sessionId,session.snapshotEvents()):[];
+    },
     prepareContext:async input=>{
       const context=ctx.get?.('rpContext');
       if(!context)return null;

@@ -89,6 +89,48 @@ test('failed frozen prose can be retried with only the writer, preserving databa
   await assert.rejects(f.presenter.rewrite({sessionId:'other',presentationId:failed.id,contextKey:'foreign',baseModel}),{code:'RECEIPT_NOT_FOUND'});
 });
 
+test('a successful active retry consumes its failed family and cannot be rendered again',async t=>{
+  const f=await fixture(t,{steps:[{commit:true},new Error('writer unavailable'),'accepted rewrite','duplicate should not run']});
+  await assert.rejects(present(f.presenter));const failed=(await f.presenter.state('story'))[0];
+  const retried=await f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'retry-one',baseModel});
+  await f.presenter.commit({sessionId:'story',presentationId:retried.id,seq:20});
+  assert.equal((await f.presenter.state('story')).find(record=>record.id===failed.id).canRetry,false);
+  await assert.rejects(f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'retry-two',baseModel}),{code:'REWRITE_ALREADY_RENDERED'});
+  assert.equal(f.calls.length,3);
+});
+
+test('rewound failed sources cannot be retried or advertised as retryable',async t=>{
+  const active=['turn-1'];
+  const f=await fixture(t,{activeContexts:async()=>active,steps:[{commit:true},new Error('writer unavailable')]});
+  await assert.rejects(present(f.presenter));const failed=(await f.presenter.state('story'))[0];
+  active.length=0;
+  assert.equal(Boolean((await f.presenter.state('story'))[0].canRetry),false);
+  await assert.rejects(f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'new-branch',baseModel}),{code:'REWRITE_SOURCE_INACTIVE'});
+  assert.equal(f.calls.length,2);
+});
+
+test('concurrent explicit retry contexts reserve the failed family once',async t=>{
+  let entered,release;
+  const started=new Promise(resolve=>entered=resolve),hold=new Promise(resolve=>release=resolve);
+  const f=await fixture(t,{steps:[{commit:true},new Error('writer unavailable'),async()=>{entered();await hold;return'only one retry'}]});
+  await assert.rejects(present(f.presenter));const failed=(await f.presenter.state('story'))[0];
+  const first=f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'retry-one',baseModel});
+  await started;
+  try{await assert.rejects(f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'retry-two',baseModel}),{code:'PRESENTATION_BUSY'})}finally{release()}
+  await first;assert.equal(f.calls.length,3);
+});
+
+test('a successful retry removed from the current branch does not permanently consume active failed source material',async t=>{
+  const active=['turn-1','retry-one'];
+  const f=await fixture(t,{activeContexts:async()=>active,steps:[{commit:true},new Error('writer unavailable'),'first retry','branch retry']});
+  await assert.rejects(present(f.presenter));const failed=(await f.presenter.state('story'))[0];
+  const first=await f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'retry-one',baseModel});
+  await f.presenter.commit({sessionId:'story',presentationId:first.id,seq:10});
+  active.splice(1,1,'retry-two');
+  assert.equal((await f.presenter.state('story')).find(record=>record.id===failed.id).canRetry,true);
+  assert.equal((await f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'retry-two',baseModel})).text,'branch retry');
+});
+
 test('assembly reads and patches the latest local overlay, then freezes only render/shared inputs for the writer', async (t) => {
   const f = await fixture(t, { entries: [entry('style', 'Old style'), entry('unused', 'DO NOT LOAD THIS', { enabled: false }), entry('simulation', 'PRIVATE AGENT RULE', { phase: 'agent' }), entry('slot', 'Mood {{mood}}')], steps: [
     { read: ['style'], operations: [{ op: 'replace', entryId: 'style', content: 'New style' }], commit: false },

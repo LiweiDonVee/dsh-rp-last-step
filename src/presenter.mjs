@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { retryEligibility } from './retry.mjs';
 import { PresetError, applyAgentOperations, compileProfile, emptyOverlay, validateProfile } from './core.mjs';
 import { resolveModelConfig } from './models.mjs';
 import { publicReceipt } from './receipts.mjs';
@@ -306,7 +307,7 @@ function migrationCandidate(profile, response) {
 }
 
 /** Post-simulation presentation only; it owns no world state and never reads main history. */
-export function createPresenter({ store, receipts, callModel, resolveModels, prepareContext, publish = () => {}, skillText = '', skillReference = '', maxAssemblySteps = 8, maxMigrationAttempts = 3 } = {}) {
+export function createPresenter({ store, receipts, callModel, resolveModels, prepareContext, activeContexts, publish = () => {}, skillText = '', skillReference = '', maxAssemblySteps = 8, maxMigrationAttempts = 3 } = {}) {
   if (!store || !receipts || typeof callModel !== 'function') throw new TypeError('store, receipts and callModel are required');
   for (const [name, value] of Object.entries({ maxAssemblySteps, maxMigrationAttempts })) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive integer`);
   const active = new Set();
@@ -525,11 +526,15 @@ Return an owner-review draft and candid blockers, never ready/bind/execute. The 
       active.add(key);let receipt;
       try{
         signal?.throwIfAborted();const original=await owned(sessionId,presentationId);
-        if(!['failed','cancelled'].includes(original.status)||!Array.isArray(original.compiled?.messages))fail('REWRITE_UNAVAILABLE','Only failed prose with frozen material can be retried',409);
+        let contexts=await activeContexts?.({sessionId});
+        const eligible=retryEligibility(await receipts.list(sessionId),original,contexts);
+        if(eligible.code==='REWRITE_SOURCE_INACTIVE'||contexts!==undefined&&!new Set(contexts).has(contextKey))fail('REWRITE_SOURCE_INACTIVE','The failed presentation source is not active in this story',409);
         const previous=await receipts.findByContextKey(sessionId,contextKey);
         if(previous){if(DONE.has(previous.status))return publicReceipt(previous);fail('PRESENTATION_BUSY','This retry context already has an attempt',409)}
+        if(!eligible.canRetry)fail(eligible.code,'This frozen presentation is not eligible for another retry',409);
         const models=await modelsFor(sessionId,baseModel),frozen=snapshot({packet:original.packet,profile:original.profile,overlay:original.overlay,compiled:original.compiled,recentProse:original.recentProse??[],contextPreparation:original.contextPreparation,models});
-        receipt=await receipts.create({...frozen,sessionId,contextKey,rewriteOf:original.id,status:'prepared',stageId:STAGES.render,text:'',profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash});
+        contexts=await activeContexts?.({sessionId});
+        receipt=await receipts.create({...frozen,sessionId,contextKey,rewriteOf:original.id,status:'prepared',stageId:STAGES.render,text:'',profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash},{activeContexts:contexts});
         await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'prepared',models});
         return publicReceipt(await renderFrozen(receipt,frozen,sessionId,signal));
       }catch(error){if(receipt)await markFailed(receipt,error,sessionId);if(signal?.aborted)signal.throwIfAborted();if(error instanceof PresetError||error?.name==='AbortError')throw error;fail('PRESENTATION_FAILED','The presentation retry failed',502)}
@@ -553,6 +558,9 @@ Return an owner-review draft and candid blockers, never ready/bind/execute. The 
       return markFailed(receipt, error, sessionId);
     },
 
-    async state(sessionId) { return (await receipts.list(sessionId)).map(publicReceipt); },
+    async state(sessionId) {
+      const records=await receipts.list(sessionId),contexts=await activeContexts?.({sessionId});
+      return records.map(record=>({...publicReceipt(record),canRetry:retryEligibility(records,record,contexts).canRetry}));
+    },
   });
 }
