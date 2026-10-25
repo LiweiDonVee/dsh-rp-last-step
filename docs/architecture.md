@@ -26,7 +26,7 @@
 | `rp_last_step_catalog` | `{}` | 取得当前目录、策略与 revision |
 | `rp_last_step_read` | `{entryIds: [id]}` | 按需读取模块正文 |
 | `rp_last_step_patch` | `{expectedRevision, operations}` | 原子修改本会话覆盖 |
-| `rp_present` | `{packet}` 或 `{rewriteOf}` | 独立生成正文；失败稿可用冻结材料只重试 writer |
+| `rp_present` | `{factReceiptId}`、`{packet}` 或 `{rewriteOf}`，互斥 | GM 事实回执呈现、旧会话公开包或冻结失败稿 writer 重试 |
 
 补丁操作是 `enable`、`disable`、`replace`、`fill`、`add`、`remove`。来源条目不能删除；remove 仅用于临时新增条目，新增条目只允许呈现阶段且不能冒充来源、必用或锁定条目。策略、阶段、绑定和源版本由 owner API 管理。
 
@@ -84,3 +84,41 @@ Studio 回放使用原始工具调用关联与 `sourceEventSeqs`，而不是仅�
 rp_last_step_catalog 的 presentations 只列出当前可重试失败记录。rp_present({rewriteOf:id}) 仍必须是唯一直接终止调用，只接受已失败/取消且已冻结编译结果的本会话稿件。它不再次运行 GM、模块组装或事实工具，也不覆盖成功稿件。
 
 原失败链的规范来源必须仍在当前有效分支。列表、执行及 receipt 原子预留共享资格判断；有效成功重试消耗该失败链，运行中的重试拒绝并发重复。若成功重试已被回退，则按当前活跃来源重新判断；没有以永久标记锁死旧失败记录。正文成功后仍需规范工具结果接受，才进入正式叙事。
+
+## 0.3 事实回执、正文修订与内容服务
+
+GM 绑定会话用 `rp_present({factReceiptId})` 读取可选 `rpGM.presentation` 的已提交事实；开场逐字返回 owner 选择，不调用 writer。普通回合将脱离复制的 `storySnapshot` 与方向包分别冻结，传给可选 Context、组装模型和 writer。旧会话继续使用 packet。
+
+同一个 context 的相同已完成请求先校验本会话事实回执、原 assistant/call 与有效规范正文，再返回已有记录，不重新请求 GM 或 writer；规范接受先于本地 complete 记账时可据原 result 补齐记账。已回退来源拒绝重放，冲突请求不改变原收据。新 context 始终经过 GM 的 latest-unpresented 校验，已正式呈现的事实返回 FACT_ALREADY_PRESENTED，被较新事实取代的未决回执返回 FACT_RECEIPT_SUPERSEDED。成功正文替代表达使用草稿接口。
+
+`rpLastStep.narratives({sessionId,agent?,signal?})` 按有效 surface 和完整 call/result 来源链返回 NarrativeRecord。ref 包含 sessionId、presentationId、assistantMessageId、callSeq、baseResultSeq、resultSeq，修订键为 `JSON.stringify([presentationId,resultSeq])`。实际正文读取有效 message.content；原 meta.text 只标识原始执行档案。公开 receipt、规范 meta.rpLastStep.record 和 NarrativeRecord 保留可选 factReceiptId，指向同一个稳定事实回执；旧 packet 会话可不含该字段。压缩保留原来源，回退替换排除失效分支。
+
+owner `createDraft/editDraft/drafts` 保存独立候选，写作复用已冻结 receipt 的 packet、compiled、contextPreparation 和 storySnapshot。每次新 writer 候选按当前 Loop render 路由和 owner 明确选择解析一次模型，进行中请求保持捕获配置；Draft.models.render 保存并公开实际 provider/model/reasoningEffort/maxTokens，不包含凭据。`createDraft` 的 kind 默认 writer；kind=manual 时直接保存 owner text，省略 text 则复制当前有效正文，不调用模型。`editDraft` 转为 manual，已有 models 可保留为原生成来源。草稿进度使用 `rp-last-step/draft`；SSE 仅发送有限元数据。候选不修改正式 history。
+
+`material` 读取已保存输入并校验会话访问，不重新查询数据库；本会话成功、失败与重试记录均可审计，未冻结字段可以为空，不要求存在活跃正式正文。其 factReceiptRef 是同一事实回执 ID 的字符串别名。Context 接受通知先核验实际有效正文，再核对本收据冻结的作者注版本与 claim，不只相信回调参数。
+
+作者注结果通知以 compiled writer snapshot 冻结为界：组装前失败释放 claim；writer 失败保留原 claim，成功重试提交实际 presentationId 和原 claimId。只有规范接受才消费，重复通知幂等。
+
+plugin-only `ensureBuiltinProfile({key,profile:{name,entries}})` 建立 immutable ready 默认版本；冲突拒绝，后续 owner 编辑另存新版本。`contentRevision/exportContent/importContent` 提供内容包接缝；导入分配新 ID、保留原文与策略、强制 draft，并按 requestId 幂等。
+
+## 原生 owner 操作与统一列表
+
+`adoptDraft({sessionId,draftId,expectedNarrative,expectedDraftVersion,signal?})` 通过 owner `commands/execute`（wire 字段 agentId）注册命令和公开 Agent.followup 建立真实回合。临时 pre-step 监听器只匹配该 inbox 请求 ID／turn；在序列化候选版本 guard 内再次核对版本和有效正文，再只替换 tool/result 的 message.content。原 data/meta 保持不变，sources 为原 call seq 和被替换 result seq。维护回合由宿主以 blocked 结束，命令单独确认采用成功；取消、错误和 unload 都释放监听器并等待 handler 退出。
+
+`retryPresentation` 使用同一原生命令通道。匹配请求后安装该 Agent 的公开 monotonic tools.guard，执行器仅允许单个 rp_present 调用且参数恰为所选 rewriteOf。其他工具、嵌套调用、新 packet／factReceiptId 和错误 ID 均拒绝。最多一次主模型派发；缺少合法终止调用时以失败结束，不再次请求模型。writer 仍使用既有失败链资格与原冻结材料。
+
+`presentationSummaries({sessionId,signal?})` 返回 body-free `{presentations,capabilities:{retryDispatch}}`。每行包含 presentationId/status/createdAt/canRetry 及可选安全 retryBlockCode/errorCode/factReceiptId/rewriteOf。canRetry 与实际执行共用 retryEligibility；retryDispatch 只在就绪原生绑定、空闲 Agent、命令通道及受支持 guard 可用时为 true。旧 state(id) 的 id 字段及形状保持兼容。
+
+material 的可选 storySnapshot 是该 receipt 冻结并安全投影的固定角色、persona、示例；不读取当前绑定，不夹带导入扩展。候选 models 在手改后表示原生成来源。UI 的未保存或过期 preview 不会静默升级为新版本。
+
+## 分支和 LastStep 状态恢复
+
+`inheritSession` 验证实际 parentSession 和 authoritative inheritedEventCount 对应的逐事件父前缀；仅初始化未绑定 child。优先使用 child 前缀最后正式 receipt 的 profile/overlay，没有组合时才取父 pinned profile 加空 overlay。继承材料仍要求真实祖先关系及有效规范 root；失败 retry 家族保持会话独立。
+
+plugin-only `exportState/preflightRestore/restoreState` 只管理 LastStep 依赖数据：所需 source/profile 版本、binding、冻结 receipt 和 versioned drafts。preflight 可在 Session 导入前做结构和碰撞检查；restore 在公开宿主导入并冷验证后读取实际目标 Session，验证 accepted source 和候选 ref，拒绝凭 receipt 制造历史。
+
+`exportState({sessionIds, additionalProfileRefs?:[{profileId,version}]})` 可额外保留选定资产尚未采用的精确文风版本及其原 source，默认空数组，并与当前依赖去重。library-only profile 保持原有 draft/ready 状态，恢复不会自动绑定或启用；显式选择 builtin 的当前 binding 不变。缺少请求版本时返回 `EXPORT_REQUIREMENT_MISSING` 并给出安全引用，不替换成 latest，也不从任意 provenance 或全库推断依赖。返回仍为 `{schemaVersion:1,revision,payload}`，revision 使用 aggregate 内容域。
+
+恢复 gate 拒绝新的 LastStep 操作／admission，drain 已有 writer、候选、canonical handler 及 store 队列。staging 保留自身 root 的无关数据；外置 `.rp-last-step-owner.json` 先记 intent，再分两次目录 rename。两步是可恢复提交，不宣称单 OS 原子动作；启动先恢复，再打开 handles／缓存。进程内读取看到完整状态或 busy，不承诺任意外部文件读者的原子视图。
+
+contentRevision 是 preset/receipt/draft/restore 的持久 aggregate，写前 reserve generation，稳定读取等待短 storage gate。旧 state.revision 和预设编辑 expectedRevision 仍属 preset-local 域；新 importContent/restoreState 在同一 gate 比较 aggregate，不能混用两域。requestId 异 payload 返回 REQUEST_ID_CONFLICT；restoreId 异 payload／Session 集合返回 RESTORE_ID_CONFLICT。同 payload 重试复用映射。StoryKit 负责 Session／跨插件协调，本插件不写其他状态所有者。

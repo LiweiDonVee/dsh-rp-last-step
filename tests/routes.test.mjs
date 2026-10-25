@@ -42,6 +42,32 @@ test('dispatches only the exact owner library and session DTOs', async () => {
   assert.equal(f.calls.length, 9);
 });
 
+test('owner draft and material actions validate exact references and refuse hidden extra fields',async()=>{
+  const ref={sessionId:'story',presentationId:'receipt',assistantMessageId:'assistant',callSeq:4,baseResultSeq:5,resultSeq:5},calls=[];
+  const service=Object.fromEntries(['narratives','drafts','material','createDraft','editDraft','adoptDraft','retryPresentation'].map(action=>[action,async(input,signal)=>{calls.push({action,input,signal});return{ok:true};}]));
+  const routes=module.createRpLastStepRoutes(service);
+  for(const body of [{action:'narratives',sessionId:'story'},{action:'drafts',sessionId:'story'},{action:'material',sessionId:'story',presentationId:'receipt'},{action:'createDraft',sessionId:'story',basedOn:ref,instruction:'Shorter'},{action:'editDraft',sessionId:'story',draftId:'draft',text:'Wording',expectedDraftVersion:2},{action:'adoptDraft',sessionId:'story',draftId:'draft',expectedNarrative:ref,expectedDraftVersion:2},{action:'retryPresentation',sessionId:'story',presentationId:'failed'}])assert.equal((await routes.request(request(body))).status,200);
+  assert.equal(calls.length,7);
+  for(const body of [{action:'createDraft',sessionId:'story',basedOn:{...ref,resultSeq:undefined}},{action:'adoptDraft',sessionId:'story',draftId:'draft',expectedNarrative:ref},{action:'adoptDraft',sessionId:'story',draftId:'draft',expectedNarrative:ref,expectedDraftVersion:2,skipChecks:true},{action:'editDraft',sessionId:'story',draftId:'draft',text:'Words',expectedDraftVersion:0}])assert.equal((await routes.request(request(body))).status,400);
+  assert.equal(calls.length,7);
+});
+
+test('manual candidate creation accepts only the contracted kind and manual text fields',async()=>{
+  const basedOn={sessionId:'story',presentationId:'receipt',assistantMessageId:'assistant',callSeq:4,baseResultSeq:5,resultSeq:5},calls=[];
+  const routes=module.createRpLastStepRoutes({createDraft:async input=>{calls.push(input);return{kind:input.kind};}});
+  for(const input of [{sessionId:'story',basedOn,kind:'manual'},{sessionId:'story',basedOn,kind:'manual',text:'Owner wording.'}]){
+    const response=await routes.request(request({action:'createDraft',...input}));assert.equal(response.status,200);assert.deepEqual(calls.at(-1),input);
+  }
+  for(const extra of [{text:'Writer text bypass'},{kind:'writer',text:'Writer text bypass'},{kind:'unknown'},{kind:'manual',text:5},{kind:'manual',models:{render:{provider:'injected',model:'route'}}}])assert.equal((await routes.request(request({action:'createDraft',sessionId:'story',basedOn,...extra}))).status,400);
+  assert.equal(calls.length,2);
+});
+
+test('presentation summary route forwards only an authorized session identifier',async()=>{
+  const calls=[],routes=module.createRpLastStepRoutes({presentationSummaries:async(input,signal)=>{calls.push({input,signal});return{presentations:[],capabilities:{retryDispatch:false}};}});
+  const response=await routes.request(request({action:'presentationSummaries',sessionId:'story'}));assert.equal(response.status,200);assert.deepEqual(calls[0].input,{sessionId:'story'});assert.equal(calls[0].signal instanceof AbortSignal,true);
+  assert.equal((await routes.request(request({action:'presentationSummaries',sessionId:'story',agent:{}}))).status,400);assert.equal(calls.length,1);
+});
+
 test('rejects unknown actions, extra fields and malformed required arguments before dispatch', async () => {
   const f = fixture();
   const routes = module.createRpLastStepRoutes(f.service);

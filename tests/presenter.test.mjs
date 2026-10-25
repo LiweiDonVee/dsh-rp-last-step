@@ -89,6 +89,43 @@ test('failed frozen prose can be retried with only the writer, preserving databa
   await assert.rejects(f.presenter.rewrite({sessionId:'other',presentationId:failed.id,contextKey:'foreign',baseModel}),{code:'RECEIPT_NOT_FOUND'});
 });
 
+test('writer-only candidates reuse frozen modules and materials without normal presentation events',async t=>{
+  let preparations=0;
+  const f=await fixture(t,{prepareContext:async()=>{preparations++;return{id:'snapshot',materials:{entries:[],history:[],recentProse:[],guidance:'Frozen guidance'}}},steps:[{commit:true},'Accepted prose.',request=>{
+    assert.equal(request.stageId,'rp-last-step.render');assert.equal(request.input.context.guidance,'Frozen guidance');assert.equal(request.input.instruction,'Make it concise.');return'Candidate prose.';
+  }]});
+  const result=await present(f.presenter);await f.presenter.commit({sessionId:'story',presentationId:result.id,seq:5});
+  const before=f.events.length,receipt=await f.receipts.get(result.id);
+  const candidate=await f.presenter.draft({sessionId:'story',receipt,instruction:'Make it concise.',baseModel,signal:new AbortController().signal});
+  assert.equal(candidate.text,'Candidate prose.');assert.equal(preparations,1);assert.equal(f.events.length,before);
+  assert.deepEqual(f.calls.map(call=>call.stageId),['rp-last-step.assemble','rp-last-step.render','rp-last-step.render']);
+  assert.equal((await f.receipts.get(result.id)).text,'Accepted prose.');
+});
+
+test('new candidates capture the current writer route once while retaining the original frozen material',async()=>{
+  const receipt={packet:{playerAction:'Push the gate.',resolvedChanges:['The gate remains closed.']},compiled:{messages:[{role:'system',content:'Frozen style.'}]},recentProse:['The rain began.'],contextPreparation:{materials:{entries:[{ref:{sourceKey:'world',entryId:'gate'},version:3,content:'Still locked.'}],history:[],recentProse:[],guidance:'Keep the failure.'}},storySnapshot:{title:'The Gate',character:{name:'Mara'},persona:{name:'Visitor'},examples:'Quiet speech.'},models:{render:{provider:'old',model:'writer-a'}}};
+  const before=structuredClone(receipt),requests=[];let route={provider:'new',model:'writer-b',reasoningEffort:'low'},resolved=0,release,entered;
+  const hold=new Promise(done=>{release=done;}),started=new Promise(done=>{entered=done;});
+  const presenter=createPresenter({store:{snapshot(){throw new Error('Candidate must not assemble modules');}},receipts:{create(){throw new Error('Candidate must not create a formal presentation');}},prepareContext(){throw new Error('Candidate must not reprepare Context');},resolveModels:async()=>{resolved++;return{render:route};},callModel:async request=>{requests.push(request);entered();await hold;return{text:'A new expression of the same failure.',config:{...request.config,maxTokens:77}};}});
+  const pending=presenter.draft({sessionId:'story',receipt,baseModel:{provider:'base',model:'current'},instruction:'Be concise.'});
+  await started;route.model='writer-c';release();const candidate=await pending;
+  assert.equal(resolved,1);assert.equal(requests.length,1);assert.deepEqual(requests[0].config,{provider:'new',model:'writer-b',reasoningEffort:'low'});
+  assert.equal(requests[0].stageId,'rp-last-step.render');assert.deepEqual(requests[0].input,{packet:before.packet,modules:before.compiled.messages,recentProse:before.recentProse,context:before.contextPreparation.materials,story:before.storySnapshot,instruction:'Be concise.'});
+  assert.deepEqual(candidate.models,{render:{provider:'new',model:'writer-b',reasoningEffort:'low',maxTokens:77}});assert.deepEqual(receipt,before);
+});
+
+test('note outcome releases assembly failure but frozen writer retry consumes the initial claim',async t=>{
+  const outcomes=[];
+  const material={id:'prepared',authorNote:{id:'note',version:1,claimId:'original-claim'},materials:{entries:[],history:[],recentProse:[],guidance:'Keep failure.'}};
+  const assembly=await fixture(t,{maxAssemblySteps:1,prepareContext:async()=>material,presentationOutcome:input=>outcomes.push(input),steps:[{commit:false}]});
+  await assert.rejects(present(assembly.presenter),{code:'ASSEMBLY_LIMIT'});assert.equal(outcomes.at(-1).status,'failed-before-freeze');
+  const f=await fixture(t,{prepareContext:async()=>material,presentationOutcome:input=>outcomes.push(input),steps:[{commit:true},new Error('writer unavailable'),'Recovered prose.']});
+  await assert.rejects(present(f.presenter));assert.equal(outcomes.at(-1).status,'failed-after-freeze');
+  const failed=(await f.presenter.state('story'))[0],retried=await f.presenter.rewrite({sessionId:'story',presentationId:failed.id,contextKey:'retry',baseModel});
+  await f.presenter.commit({sessionId:'story',presentationId:retried.id,seq:15});
+  assert.equal(outcomes.at(-1).claimId,'original-claim');assert.equal(outcomes.at(-1).presentationId,retried.id);assert.equal(outcomes.at(-1).status,'accepted');
+});
+
 test('a successful active retry consumes its failed family and cannot be rendered again',async t=>{
   const f=await fixture(t,{steps:[{commit:true},new Error('writer unavailable'),'accepted rewrite','duplicate should not run']});
   await assert.rejects(present(f.presenter));const failed=(await f.presenter.state('story'))[0];

@@ -134,18 +134,18 @@ export function registerRpLastStepAgent(ctx, service) {
       parameters: {...schema({ packet: schema({
         playerAction: string, sceneInstruction: string, resolvedChanges: strings, visibleConsequences: strings,
         openHooks: strings, proseConstraints: strings, publicFactRefs: strings, variables: { type: 'object' },
-      }, ['playerAction']),rewriteOf:string }),oneOf:[{required:['packet']},{required:['rewriteOf']}]},
+      }, ['playerAction']),rewriteOf:string,factReceiptId:string }),oneOf:[{required:['packet']},{required:['rewriteOf']},{required:['factReceiptId']}]},
       output: {
-        schema: { type: 'object', properties: { id: string, status: { type: 'string', enum: ['rendered', 'complete'] }, text: string }, required: ['id', 'status', 'text'] },
+        schema: { type: 'object', properties: { id: string, status: { type: 'string', enum: ['rendered', 'complete'] }, text: string, factReceiptId: string }, required: ['id', 'status', 'text'] },
         render: (_args, value) => [{ type: 'text', text: value.text }],
         presentationMeta: (_args, value) => ({ rpLastStep: { schemaVersion: 1, record: { ...value, status: 'complete' } } }),
       },
       async execute(args, exec) {
-        argumentsFor(args, ['packet','rewriteOf']);
+        argumentsFor(args, ['packet','rewriteOf','factReceiptId']);
         const input = caller(service, exec);
         const contextKey = terminalContext(exec, input.sessionId);
-        if((args.packet===undefined)===(args.rewriteOf===undefined)||args.rewriteOf!==undefined&&(typeof args.rewriteOf!=='string'||!args.rewriteOf.trim()))throw new PresetError('INVALID_TOOL_ARGUMENTS','Provide a packet or a failed frozen presentation to retry');
-        const request=args.rewriteOf===undefined?{packet:normalizeDirectionPacket(args.packet)}:{rewriteOf:args.rewriteOf};
+        if(['packet','rewriteOf','factReceiptId'].filter(key=>args[key]!==undefined).length!==1||['rewriteOf','factReceiptId'].some(key=>args[key]!==undefined&&(typeof args[key]!=='string'||!args[key].trim())))throw new PresetError('INVALID_TOOL_ARGUMENTS','Provide one fact receipt, legacy public packet, or frozen failed presentation');
+        const request=args.factReceiptId!==undefined?{factReceiptId:args.factReceiptId}:args.rewriteOf===undefined?{packet:normalizeDirectionPacket(args.packet)}:{rewriteOf:args.rewriteOf};
         const result = await service.present({ ...input, ...request, contextKey, callId: exec.callId });
         exec.signal.throwIfAborted();
         exec.concludeTurn();

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
@@ -9,6 +9,8 @@ import {
 const queues = new Map();
 const has = (value, key) => Object.hasOwn(value, key);
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const ordered=value=>Array.isArray(value)?value.map(ordered):record(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,ordered(value[key])])):value;
+const digest=value=>createHash('sha256').update(typeof value==='string'?value:JSON.stringify(ordered(value))).digest('hex');
 
 function put(target, key, value) {
   Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
@@ -32,6 +34,7 @@ export async function createPresetStore({ directory } = {}) {
   const root = resolve(directory);
   const file = join(root, 'preset-store.json');
   await mkdir(root, { recursive: true });
+  let mutationGate=work=>work();
 
   async function readState() {
     let raw;
@@ -76,7 +79,7 @@ export async function createPresetStore({ directory } = {}) {
   }
 
   function mutate(expectedRevision, work) {
-    return serial(async () => {
+    return serial(() => mutationGate(async () => {
       if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
         throw new PresetError('EXPECTED_REVISION_REQUIRED', 'A nonnegative expectedRevision is required');
       }
@@ -86,11 +89,13 @@ export async function createPresetStore({ directory } = {}) {
       state.revision++;
       await writeState(state);
       return detached({ revision: state.revision, ...result });
-    });
+    }));
   }
 
   await serial(readState);
   return Object.freeze({
+    setMutationGate(gate){mutationGate=gate;},
+    drain:()=>serial(()=>{}),
     snapshot() {
       return read((state) => ({
         revision: state.revision,
@@ -140,6 +145,22 @@ export async function createPresetStore({ directory } = {}) {
       });
     },
 
+    bindCapturedSession(sessionId,input){
+      const captured=detached(input);requireId(sessionId,'Session id');
+      return serial(async()=>{
+        const state=await readState();if(has(state.bindings,sessionId))return{revision:state.revision};
+        return mutationGate(async()=>{
+        const state=await readState();if(has(state.bindings,sessionId))return{revision:state.revision};
+        if(captured.expectedRevision!==state.revision)throw new PresetError('REVISION_CONFLICT','The preset library changed before child inheritance',409);
+        const profile=selectedProfile(state,captured.profileId,captured.version);
+        if(!profile)throw new PresetError('PROFILE_NOT_FOUND','The captured profile version is unavailable',404);
+        if(profile.status!=='ready'||profile.entries.some(entry=>entry.enabled&&entry.phase==='unclassified'))throw new PresetError('PROFILE_NOT_READY','The captured profile must be ready',409);
+        const overlay=applyAgentOperations(profile,captured.overlay,[]);
+        put(state.bindings,sessionId,{profileId:profile.id,version:profile.version,overlay});state.revision++;await writeState(state);return{revision:state.revision};
+        });
+      });
+    },
+
     applyOperations(sessionId, operations, { expectedRevision } = {}) {
       const captured = detached(operations);
       return mutate(expectedRevision, (state) => {
@@ -160,6 +181,63 @@ export async function createPresetStore({ directory } = {}) {
 
     source(id) {
       return read((state) => has(state.sources, id) ? state.sources[id] : null);
+    },
+
+    ensureBuiltinProfile(input){
+      const captured=detached(input);requireId(captured.key,'Builtin key');
+      if(!record(captured.profile)||Object.keys(captured.profile).some(key=>!['name','entries'].includes(key)))throw new PresetError('INVALID_BUILTIN','Builtin profiles accept only name and entries');
+      const normalized=validateProfile({...captured.profile,id:'builtin',version:1,status:'ready',sourceId:null});
+      if(normalized.entries.some(entry=>entry.enabled&&entry.phase==='unclassified'))throw new PresetError('PROFILE_NOT_READY','Builtin profiles require classified modules',409);
+      const hash=digest(normalized);
+      return serial(async()=>{
+        const state=await readState(),prior=state.builtins&&has(state.builtins,captured.key)?state.builtins[captured.key]:null;
+        if(prior){if(prior.hash!==hash)throw new PresetError('BUILTIN_CONFLICT','The builtin key already identifies different static content',409);return detached({profileId:prior.profileId,version:prior.version});}
+        return mutationGate(async()=>{
+        const state=await readState(),current=state.builtins&&has(state.builtins,captured.key)?state.builtins[captured.key]:null;
+        if(current){if(current.hash!==hash)throw new PresetError('BUILTIN_CONFLICT','The builtin key already identifies different static content',409);return{profileId:current.profileId,version:current.version};}
+        const profile=validateProfile({...normalized,id:randomUUID()});
+        state.builtins??={};put(state.builtins,captured.key,{hash,profileId:profile.id,version:1});put(state.profiles,profile.id,[profile]);
+        state.revision++;await writeState(state);return {profileId:profile.id,version:1};
+        });
+      });
+    },
+
+    exportContent({profileId,version}){
+      return read(state=>{
+        const profile=selectedProfile(state,profileId,version);
+        if(!profile)throw new PresetError('PROFILE_NOT_FOUND','Profile version is unavailable',404);
+        const original=profile.sourceId&&has(state.sources,profile.sourceId)?state.sources[profile.sourceId]:null;
+        const source=original?Object.fromEntries(['format','rawText','dataBase64','sha256','provenance'].filter(key=>original[key]!==undefined).map(key=>[key,original[key]])):null;
+        const content=Object.fromEntries(['id','name','version','status','sourceId','entries'].map(key=>[key,profile[key]]));
+        return {profile:content,...source?{source}:{}};
+      });
+    },
+
+    importContent(input){
+      const captured=detached(input);requireId(captured.requestId,'Import request id');
+      const validated=validateProfile(captured.profile),source=captured.source;
+      if(source!==undefined){
+        if(!record(source)||typeof source.format!=='string'||typeof source.sha256!=='string'||(typeof source.rawText==='string')===(typeof source.dataBase64==='string'))throw new PresetError('INVALID_CONTENT_SOURCE','Original source bytes and hash are required');
+        const bytes=source.rawText!==undefined?Buffer.from(source.rawText,'utf8'):Buffer.from(source.dataBase64,'base64');
+        if(createHash('sha256').update(bytes).digest('hex')!==source.sha256.toLowerCase())throw new PresetError('CONTENT_HASH_MISMATCH','Original source hash does not match its bytes');
+      }
+      const hash=digest({profile:captured.profile,...source?{source}:{}});
+      return serial(async()=>{
+        const state=await readState(),prior=state.contentImports&&has(state.contentImports,captured.requestId)?state.contentImports[captured.requestId]:null;
+        if(prior){if(prior.hash!==hash)throw new PresetError('REQUEST_ID_CONFLICT','The import request already identifies different content',409);return detached(prior.result);}
+        return mutationGate(async generation=>{
+        const state=await readState(),current=state.contentImports&&has(state.contentImports,captured.requestId)?state.contentImports[captured.requestId]:null;
+        if(current){if(current.hash!==hash)throw new PresetError('REQUEST_ID_CONFLICT','The import request already identifies different content',409);return detached(current.result);}
+        const expectedPresetRevision=captured.expectedContentRevision===undefined?captured.expectedRevision:state.revision;
+        if(!Number.isSafeInteger(expectedPresetRevision)||expectedPresetRevision<0)throw new PresetError('EXPECTED_REVISION_REQUIRED','A nonnegative expectedRevision is required');
+        if(expectedPresetRevision!==state.revision)throw new PresetError('REVISION_CONFLICT','The preset library changed before import',409);
+        const sourceId=source?randomUUID():null,profile=validateProfile({...validated,id:randomUUID(),version:1,sourceId,status:'draft'});
+        if(source){const safe=Object.fromEntries(['format','rawText','dataBase64','sha256','provenance'].filter(key=>source[key]!==undefined).map(key=>[key,source[key]]));put(state.sources,sourceId,{...safe,id:sourceId,importedFrom:{profileId:validated.id,version:validated.version}});}
+        put(state.profiles,profile.id,[profile]);state.revision++;
+        const result={revision:captured.expectedContentRevision===undefined?state.revision:generation,profileId:profile.id,version:1,...sourceId?{sourceId}:{},reviewRequired:true};
+        state.contentImports??={};put(state.contentImports,captured.requestId,{hash,result});await writeState(state);return detached(result);
+        },captured.expectedContentRevision);
+      });
     },
 
     binding(sessionId) {

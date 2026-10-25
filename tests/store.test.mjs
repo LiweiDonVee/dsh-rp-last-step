@@ -19,6 +19,47 @@ function readyProfile(id = 'native') {
   };
 }
 
+test('static builtin identity is immutable across owner edits and concurrent helper calls',async t=>{
+  const {store,directory}=await temporaryStore(t),profile={name:'Default prose',entries:readyProfile().entries};
+  const first=await store.ensureBuiltinProfile({key:'dsh-rp-gm.default.v1',profile});
+  assert.equal(first.version,1);assert.equal((await store.profile(first.profileId,1)).status,'ready');
+  const owner=structuredClone(await store.profile(first.profileId));owner.entries[0].content='Owner variation';
+  await store.saveProfile(owner,{expectedRevision:(await store.snapshot()).revision});
+  const restarted=await createPresetStore({directory});
+  assert.deepEqual(await restarted.ensureBuiltinProfile({key:'dsh-rp-gm.default.v1',profile}),first);
+  await assert.rejects(store.ensureBuiltinProfile({key:'dsh-rp-gm.default.v1',profile:{...profile,name:'Different builtin'}}),{code:'BUILTIN_CONFLICT'});
+  assert.equal((await store.profile(first.profileId,1)).entries[0].content,'Original');
+});
+
+test('content transfer preserves source and policy under new IDs with durable request idempotency',async t=>{
+  const {store,directory}=await temporaryStore(t),rawText='{ "prompts":[{"identifier":"rule","content":"Be brief."}] }';
+  const imported=await store.importSource(rawText,{expectedRevision:0});
+  const exported=await store.exportContent({profileId:imported.profileId,version:1});
+  assert.equal(exported.source.rawText,rawText);
+  const incoming=structuredClone(exported);incoming.profile.status='ready';incoming.profile.entries[0].locked=true;incoming.profile.entries[0].required=true;
+  const first=await store.importContent({...incoming,requestId:'pack:profile:1',expectedRevision:1});
+  assert.notEqual(first.profileId,imported.profileId);assert.equal(first.version,1);assert.equal(first.reviewRequired,true);
+  const profile=await store.profile(first.profileId);assert.equal(profile.status,'draft');assert.equal(profile.entries[0].locked,true);assert.equal(profile.entries[0].required,true);
+  assert.equal((await store.source(first.sourceId)).rawText,rawText);
+  const restarted=await createPresetStore({directory});
+  assert.deepEqual(await restarted.importContent({...incoming,requestId:'pack:profile:1',expectedRevision:1}),first);
+  incoming.profile.name='Changed';
+  await assert.rejects(store.importContent({...incoming,requestId:'pack:profile:1',expectedRevision:first.revision}),{code:'REQUEST_ID_CONFLICT'});
+  assert.equal((await store.snapshot()).revision,first.revision);
+});
+
+test('captured fork bindings preserve an existing child and validate inherited policy atomically',async t=>{
+  const {store}=await temporaryStore(t),profile=readyProfile();profile.entries[0].locked=false;
+  await store.saveProfile(profile,{expectedRevision:0});
+  const captured={entries:{style:{content:'At the fork prefix'}},additions:[]};
+  const first=await store.bindCapturedSession('child',{profileId:profile.id,version:1,overlay:captured,expectedRevision:1});
+  assert.equal((await store.binding('child')).overlay.entries.style.content,'At the fork prefix');
+  assert.deepEqual(await store.bindCapturedSession('child',{profileId:profile.id,version:1,overlay:{entries:{style:{content:'Later parent'}},additions:[]},expectedRevision:1}),first);
+  assert.equal((await store.binding('child')).overlay.entries.style.content,'At the fork prefix');
+  await assert.rejects(store.bindCapturedSession('foreign',{profileId:profile.id,version:1,overlay:{entries:{style:{enabled:false}},additions:[]},expectedRevision:first.revision}),{code:'ENTRY_REQUIRED'});
+  assert.equal(await store.binding('foreign'),null);assert.equal((await store.snapshot()).revision,first.revision);
+});
+
 test('sources roundtrip exactly after restart and imported profiles remain draft', async (t) => {
   const { directory, store } = await temporaryStore(t);
   const rawText = '{\r\n "prompts":[{"identifier":"a","enabled":false,"content":"A"}],"extensions":{"unknown":[1,2]}\r\n}\r\n';

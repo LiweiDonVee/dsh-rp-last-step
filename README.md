@@ -24,13 +24,13 @@ flowchart TD
 
 ## 安装
 
-已验证 **DSH 0.2.1-rc.2**。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。
+0.3 需要 **DSH 0.2.1-rc.3** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
 
-1. 从 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases/latest) 下载 `dsh-rp-last-step-0.2.0.tgz`。
+1. 从 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases/latest) 下载 `dsh-rp-last-step-0.3.0.tgz`。
 2. 完全退出 DSH，包括后台进程。在文件所在目录执行：
 
 ```powershell
-dsh plugin --profile desktop add ./dsh-rp-last-step-0.2.0.tgz
+dsh plugin --profile desktop add ./dsh-rp-last-step-0.3.0.tgz
 ```
 
 3. 重启 DSH，点击会话顶部的 **预设**，或从右侧新增页签导航打开 **RP 最后一步**。
@@ -39,10 +39,10 @@ Web 模式将 `desktop` 改为 `web`。不需要另开服务、安装 Node/pnpm 
 
 ```powershell
 $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'
-& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.2.0.tgz
+& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.3.0.tgz
 ```
 
-自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。发布页附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.2.0.tgz -Algorithm SHA256` 核对。
+自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。发布页附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.3.0.tgz -Algorithm SHA256` 核对。
 
 ## 从导入到第一轮正文
 
@@ -52,7 +52,7 @@ $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runti
 4. 检查编译预览，解决未分类模块、缺失变量和未映射标记。把预设设为可用，保存新版本，再点击 **应用到当前故事**。
 5. 向已有 RP Agent 发送行动。它完成工具和事实处理后，单独调用 `rp_present`；模块组装通过检查后，正文模型才开始写作。
 
-成功后直接结束回合，主 Agent 不再复述正文。插件自带 **生成记录** 页，可查看本会话已提交稿件。想获得故事分支、回退和沉浸阅读体验，可同时安装 RP Studio。
+成功后直接结束回合，主 Agent 不再复述正文。插件自带 **生成记录** 页，显示当前分支的正式正文、表达候选、失败重试与冻结材料。想获得故事分支、回退和沉浸阅读体验，可同时安装 RP Studio。
 
 ## 用户与 Agent 分别能改什么
 
@@ -88,15 +88,27 @@ $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runti
 
 失败且已冻结材料的稿件可从 `rp_last_step_catalog` 的 `presentations` 中查看可重试 ID，然后单独调用 `rp_present({rewriteOf: id})`。仅重新调用 writer，不重复 GM、模块组装或事实工具。原来源已回退、已有有效成功重试或仍在运行时会拒绝。此操作不覆盖已成功稿件。
 
+0.3 可选接入通用 RP GM 的事实回执：新 GM 故事用 `rp_present({factReceiptId})`，开场逐字提交 owner 选择，普通回合冻结角色、persona、示例与事实材料；无 Context 时仍保留这些固定来源。旧 packet 会话继续使用原有工具。
+
+## 候选、手改与正文采用
+
+在 **生成记录** 点击 **直接手改**，从当前有效正文建立候选，不调用模型；也可 **生成另一稿**，使用当前 Loop 正文模型和原冻结材料。候选可保存版本、比较并采用，未采用的文字不进入正式剧情。采用绑定预览版本和最新事实回合，后续已有事实工作、分支失效或版本过期会拒绝。修改事实请使用故事回退或分支。
+
+采用通过真实原生维护回合只替换正文 content，保留原事实与工具来源，且不调用模型。当前 rc.3 将维护回合结束原因记为 **blocked**；操作成功另有确认，这不表示剧情行动失败，也不会伪造为 completed。
+
+失败记录中的 **仅重试正文** 复用原冻结输入。原生按钮可包含一次受限主模型派发和一次 writer 调用；执行器只允许所选失败 ID 的 `rp_present({rewriteOf})`，不能改为新 packet、事实回执或事实工具。材料检查读取当时保存的候选池、实际选材、模块和模型，不从当前数据库重建，也不展示隐藏推理。
+
+![正文候选与比较](docs/images/drafts.png)
+
 [组合验收记录](docs/fullstack-acceptance.md)。参考分析见 [DV fork 审查](docs/reference-review-tavern2agent.md)。组合验收：`node scripts/fullstack-smoke.mjs`，设置 DSH_DATABASE_TGZ、DSH_CONTEXT_TGZ、DSH_LOOP_TGZ 指向各发布包。
 
 ## 数据与当前边界
 
-数据保存在 `$DSH_HOME/app-data/rp-last-step/`；未设置 `DSH_HOME` 时使用 `~/.dsh`。关闭 DSH 后可备份这个目录，包含来源、预设版本、会话覆盖和呈现记录。
+数据保存在 `$DSH_HOME/app-data/rp-last-step/`；未设置 `DSH_HOME` 时使用 `~/.dsh`。关闭 DSH 后备份该目录及同级 `.rp-last-step-owner.json`，保留来源、版本、覆盖、稿件、冻结材料和持久 revision。内容包与完整故事恢复由可选 StoryKit 协调；本插件只导入、校验自己的数据，不改写 Session 日志或其他插件存储。
 
 ST 脚本、正则、插入深度、世界书标记和宏不自动获得完整运行语义。原始字段保留供回溯，迁移报告明确未适配项；模型生成的迁移内容仍需人工审阅。
 
-生成记录是已提交稿件档案，当前剧情分支以 RP Studio 故事页为准。可选复核模型、专用正文重试按钮及自由编辑流程尚未提供；失败不代表可以重新运行已经完成的状态工具。更多说明见 [使用与恢复](docs/usage.md) 和 [验收记录](docs/acceptance.md)。
+生成审计包含旧稿和失败记录，当前分支正文来自有效规范来源。手改和候选只改变表达，不回滚或重新执行状态工具。可选复核模型、模拟引擎和媒体功能不在本版范围。更多说明见 [使用与恢复](docs/usage.md)、[0.3 原生验收](docs/acceptance-0.3.md) 和 [旧版验收](docs/acceptance.md)。
 
 ## 开发
 

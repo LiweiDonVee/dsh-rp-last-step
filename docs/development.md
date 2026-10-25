@@ -10,7 +10,7 @@ pnpm check
 pnpm package
 ```
 
-`check` 运行零 warning lint、Node 宿主/内核测试、Vitest React UI 测试和 host/client 生产构建。`package` 生成 `artifacts/dsh-rp-last-step-0.1.0.tgz` 与 `SHA256SUMS.txt`。
+`check` 运行零 warning lint、Node 宿主/内核测试、Vitest React UI 测试和 host/client 生产构建。`package` 生成 `artifacts/dsh-rp-last-step-0.3.0.tgz` 与 `SHA256SUMS.txt`。
 
 构建会将 `skills/adapting-sillytavern-rp-presets/` 复制到 `dist/skills/`，宿主注册这份标准 skill 正文与资源目录。发布包包含打包后的 host、ModuleLoader client、skill、manifest、Cordis patch、README 和许可证；开发依赖不进入安装要求。
 
@@ -18,7 +18,7 @@ UI 测试在 `tests/ui/`，Node 测试在 `tests/*.test.mjs`，两者分开运�
 
 ## 单插件原生验收
 
-安装官方 DSH 0.2.1-rc.2 和 Playwright Chromium：
+安装官方 DSH 0.2.1-rc.3 和 Playwright Chromium：
 
 ```powershell
 pnpm exec playwright install chromium
@@ -45,6 +45,10 @@ pnpm smoke -- --integration
 独立验收结果位于 `.runtime/rp-step-alone-evidence/`，联用结果位于 `.runtime/rp-step-evidence/`。`acceptance.json` 保存受测包哈希；实际验证范围见 [验收记录](acceptance.md)。
 
 ## 修改与发布
+
+0.3 原生回归使用 `pnpm smoke:drafts`，需要先 `pnpm package`。可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指向已缓存 Chromium；`DSH_LAST_STEP_EVIDENCE` 指定证据目录，默认 `.runtime/last-step-drafts-evidence/`。脚本独立临时 home 安装实际 tgz，执行手改／采用／受限重试 UI、fork、冷重启，再在第二个 home 通过公开 persistence 导入 exact Session 和本插件 state，验证零历史调用与再次 fork。Context 使用明确合同夹具，GM 使用本地事实工具；这不是完整 GM/Database/Context/Studio 组合或付费模型质量验收。
+
+`tests/owner-state.test.mjs` 注入 before-switch、between-renames、after-install 故障；所有恢复文件都在随机测试 owner namespace。aggregate revision 与旧 preset revision 域、候选／canonical drain、Session ancestry、restore 冲突和审计读取均有 focused Node 覆盖。旧组合脚本和 `fullstack-acceptance.md` 的 rc.2 范围是历史记录。
 
 权限修改应同时检查操作接口、编译器与批量原子性；模型流程修改应检查准备配置与实际调用一致、取消和重复提交，以及失败后是否重复执行事实工具。
 

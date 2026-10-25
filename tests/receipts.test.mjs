@@ -5,6 +5,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createReceiptStore, publicReceipt } from '../src/receipts.mjs';
 
+test('public receipts preserve only the stable fact receipt association for GM consumers',()=>{
+  const value=publicReceipt({id:'presentation',status:'rendered',text:'Opening.',factReceiptId:'fact-opening',packet:{playerAction:'Begin'},storySnapshot:{title:'Fixed source'}});
+  assert.equal(value.factReceiptId,'fact-opening');assert.equal(value.packet,undefined);assert.equal(value.storySnapshot,undefined);
+  assert.equal(Object.hasOwn(publicReceipt({id:'legacy',status:'rendered',text:'Old prose.'}),'factReceiptId'),false);
+});
+
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'rp-receipts-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
