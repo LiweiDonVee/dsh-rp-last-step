@@ -13,6 +13,7 @@
 - 在第二轮结束事件处分叉，子会话只继承第2次数据库变化和2条叙事，父会话的后续变化不进入子分支。随后用宿主合法 surface replacement 回退第五轮和重试，打开的数据库视图自动恢复到第4次变化，旧失败来源不再可重试。宿主重启后资料与4条有效叙事恢复。
 - 完整来源关联包含 assistant message ID、sourceEventSeqs 与工具事件序号；提供方复用工具调用 ID 不串回合。
 - Astra 最终审查发现的失效来源重试、成功重试重复和数据库视图失效通知已修复，并通过定向回归与复核。
+- 可选安装现有 RP Studio1.2 后，沉浸阅读显示当前4条有效叙事，不复活已回退的第五轮重试正文；五插件组合无浏览器运行错误。
 
 单元测试合计229项：数据库43运行时＋14界面，上下文36运行时＋17界面，最后一步98运行时＋21界面。三个项目的 lint 和生产构建通过。
 
@@ -28,6 +29,8 @@ node scripts/fullstack-smoke.mjs
 ```
 
 改为实际下载路径。需要官方启动器与 Playwright Chromium，可用 DSH_BIN 和 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH 指定。结果 .runtime/fullstack-evidence/acceptance.json 保存受测安装包哈希，截图在同目录。Release 附 SHA256SUMS 对应正式安装包。
+
+可再设置 DSH_STUDIO_TGZ 指向 dsh-rp-studio-1.2.0.tgz，验收现有故事阅读界面的联动与回退显示。
 
 ## 范围
 

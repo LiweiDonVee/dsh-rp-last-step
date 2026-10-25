@@ -14,6 +14,7 @@ const artifacts={
   lastStep:resolve('artifacts/dsh-rp-last-step-0.2.0.tgz'),
   loop:resolve(process.env.DSH_LOOP_TGZ??'../dsh-loop-studio/artifacts/dsh-loop-studio-0.1.0.tgz'),
 }
+if(process.env.DSH_STUDIO_TGZ)artifacts.studio=resolve(process.env.DSH_STUDIO_TGZ)
 const hashes=Object.fromEntries(await Promise.all(Object.entries(artifacts).map(async([name,path])=>[name,createHash('sha256').update(await readFile(path)).digest('hex')])))
 await writeFile(join(evidence,'acceptance.json'),JSON.stringify({passed:false,status:'running',hashes}))
 const retrievalCalls=[]
@@ -105,11 +106,18 @@ try{
   await page.getByRole('button',{name:'全屏',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[data-rp-database-session]')?.clientWidth>1000);await page.screenshot({path:join(evidence,'database-fullscreen.png')})
   await page.evaluate(()=>window.__workspaceCtx.get('sidebarRight').openTab('rp-context'));await page.getByRole('heading',{name:'主动上下文',exact:true}).waitFor();await page.screenshot({path:join(evidence,'context-fullscreen.png')})
   await page.setViewportSize({width:520,height:900});await page.screenshot({path:join(evidence,'context-narrow.png')});await page.setViewportSize({width:1440,height:1000})
+  if(artifacts.studio){
+    await page.evaluate(()=>window.__workspaceCtx.get('sidebarRight').openTab('rp-studio'))
+    await page.getByRole('button',{name:'沉浸阅读',exact:true}).click()
+    await page.locator('.dsh-rp-workspace').getByText('第4次尝试后，门仍未打开。远处的钟声慢慢散去。',{exact:true}).waitFor()
+    if((await page.locator('.dsh-rp-workspace').innerText()).includes('第5次尝试后'))throw Error('Reader revived rolled-back retry prose')
+    await page.screenshot({path:join(evidence,'studio-reader.png')})
+  }
   await stopHost();await visit(await startHost())
   const restored=await db('state',{sessionId}),restoredHistory=await context('state',{sessionId})
   if(restored.binding.entries.find(entry=>entry.id==='editable').content!=='会话更新 4'||restoredHistory.history.length!==4||restoredHistory.history[0].mode!=='index')throw Error('Restart did not preserve branch state')
   if(errors.length)throw Error('Browser runtime errors '+JSON.stringify(errors))
-  const result={passed:true,host:'DSH 0.2.1-rc.2',hashes,worldCalls:5,formalNarratives:5,activeNarrativesAfterRollback:4,childNarratives:2,sourceUnchanged:true,readonlyEnforced:true,candidateOutsideSearch:true,historySummaryExpandFold:true,writerOnlyRetry:true,nativeRollback:true,restart:true,embeddingCalls:retrievalCalls.filter(call=>call.path==='/v1/embeddings').length,rerankCalls:retrievalCalls.filter(call=>call.path==='/v1/rerank').length,stageCalls:afterRetry.calls.filter(call=>call.kind!=='MAIN'),errors}
+  const result={passed:true,host:'DSH 0.2.1-rc.2',hashes,studioReader:!!artifacts.studio,worldCalls:5,formalNarratives:5,activeNarrativesAfterRollback:4,childNarratives:2,sourceUnchanged:true,readonlyEnforced:true,candidateOutsideSearch:true,historySummaryExpandFold:true,writerOnlyRetry:true,nativeRollback:true,restart:true,embeddingCalls:retrievalCalls.filter(call=>call.path==='/v1/embeddings').length,rerankCalls:retrievalCalls.filter(call=>call.path==='/v1/rerank').length,stageCalls:afterRetry.calls.filter(call=>call.kind!=='MAIN'),errors}
   await writeFile(join(evidence,'acceptance.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result))
 }catch(error){console.error(error.message);if(page){await page.screenshot({path:join(evidence,'failure.png')}).catch(()=>{});console.error((await page.locator('body').innerText().catch(()=>'' )).slice(-5000))}console.error(redact(logs.slice(-9000)));await writeFile(join(evidence,'acceptance.json'),JSON.stringify({passed:false,hashes,error:redact(error.message)},null,2));process.exitCode=1}
 finally{await browser?.close();await stopHost();retrieval.closeIdleConnections();await new Promise(done=>retrieval.close(done))}
