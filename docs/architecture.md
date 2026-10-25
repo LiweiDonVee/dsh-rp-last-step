@@ -26,7 +26,7 @@
 | `rp_last_step_catalog` | `{}` | 取得当前目录、策略与 revision |
 | `rp_last_step_read` | `{entryIds: [id]}` | 按需读取模块正文 |
 | `rp_last_step_patch` | `{expectedRevision, operations}` | 原子修改本会话覆盖 |
-| `rp_present` | `{packet}` | 独立生成最终正文并终止回合 |
+| `rp_present` | `{packet}` 或 `{rewriteOf}` | 独立生成正文；失败稿可用冻结材料只重试 writer |
 
 补丁操作是 `enable`、`disable`、`replace`、`fill`、`add`、`remove`。来源条目不能删除；remove 仅用于临时新增条目，新增条目只允许呈现阶段且不能冒充来源、必用或锁定条目。策略、阶段、绑定和源版本由 owner API 管理。
 
@@ -74,3 +74,13 @@ $DSH_HOME/app-data/rp-last-step/
 Loop Studio 通过可选服务注册迁移、组装、正文节点并解析冻结路由。RP Studio 通过可选 `rp.studio.workspace.actions` 槽打开编辑器，通过进程内安全正文事件获得流式文本；持久化叙事使用规范 tool/result 的 `meta.rpLastStep`。它不是自定义 Session 事件类型。
 
 Studio 回放使用原始工具调用关联与 `sourceEventSeqs`，而不是仅靠可能复用的 provider 工具 ID。模型处理文字在已启用最后一步的区间不作为 GM 旁白，普通旧故事不受此规则改变。独立记录页是已提交稿件档案，不是分支投影。
+
+## 0.2 材料准备与失败重试
+
+安装可选 rpContext 后，present 在原子预留呈现记录之后、文风模块组装之前调用中间 GM。GM 借助可选 rpDatabase 主动搜索、读取、选择、排序和编辑允许的会话条目，并决定历史表示。返回的内容快照、版本/来源引用、最近正文和指导冻结到 contextPreparation，再作为独立数据交给组装模型和 writer。
+
+公开结果只记录材料 ID、数据库/历史引用、实际模型与字符规模，不附带整个数据库正文。完整材料保存在本机呈现记录中供回溯；后续数据库变化不影响本次输入。上下文关闭或未安装时使用旧行为。
+
+rp_last_step_catalog 的 presentations 只列出当前可重试失败记录。rp_present({rewriteOf:id}) 仍必须是唯一直接终止调用，只接受已失败/取消且已冻结编译结果的本会话稿件。它不再次运行 GM、模块组装或事实工具，也不覆盖成功稿件。
+
+原失败链的规范来源必须仍在当前有效分支。列表、执行及 receipt 原子预留共享资格判断；有效成功重试消耗该失败链，运行中的重试拒绝并发重复。若成功重试已被回退，则按当前活跃来源重新判断；没有以永久标记锁死旧失败记录。正文成功后仍需规范工具结果接受，才进入正式叙事。
