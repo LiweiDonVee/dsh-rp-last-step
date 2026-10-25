@@ -307,7 +307,7 @@ function migrationCandidate(profile, response) {
 }
 
 /** Post-simulation presentation only; it owns no world state and never reads main history. */
-export function createPresenter({ store, receipts, callModel, resolveModels, prepareContext, activeContexts, publish = () => {}, skillText = '', skillReference = '', maxAssemblySteps = 8, maxMigrationAttempts = 3 } = {}) {
+export function createPresenter({ store, receipts, callModel, resolveModels, prepareContext, presentationOutcome, activeContexts, publish = () => {}, skillText = '', skillReference = '', maxAssemblySteps = 8, maxMigrationAttempts = 3 } = {}) {
   if (!store || !receipts || typeof callModel !== 'function') throw new TypeError('store, receipts and callModel are required');
   for (const [name, value] of Object.entries({ maxAssemblySteps, maxMigrationAttempts })) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive integer`);
   const active = new Set();
@@ -340,8 +340,12 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
     const status = cancelled ? 'cancelled' : 'failed';
     const code = error instanceof PresetError ? error.code : cancelled ? 'PRESENTATION_CANCELLED' : 'PRESENTATION_FAILED';
     const updated = await receipts.update(receipt.id, { status, errorCode: code });
+    await outcome(updated,Array.isArray(updated.compiled?.messages)?'failed-after-freeze':'failed-before-freeze');
     try { await emit({ sessionId, presentationId: receipt.id, stageId: updated.stageId ?? STAGES.render, status, code }); } catch { /* Preserve the primary model/store error. */ }
     return publicReceipt(updated);
+  }
+  async function outcome(receipt,status){
+    try{await presentationOutcome?.({sessionId:receipt.sessionId,presentationId:receipt.id,claimId:receipt.contextPreparation?.authorNote?.claimId??receipt.id,status});}catch{/* Idempotent canonical notifications can be retried without changing accepted prose. */}
   }
 
   async function renderFrozen(receipt,composition,sessionId,signal){
@@ -351,7 +355,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
     const gate=thoughtGate(async delta=>{signal?.throwIfAborted();await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'rendering',delta})});
     let streamed=false;
     const writer=await callModel({sessionId,stageId:STAGES.render,config:actualModels.render,system:RENDER_SYSTEM,
-      input:snapshot({packet:composition.packet,modules:composition.compiled.messages,recentProse:composition.recentProse,...composition.contextPreparation?{context:composition.contextPreparation.materials}:{}}),signal,
+       input:snapshot({packet:composition.packet,modules:composition.compiled.messages,recentProse:composition.recentProse,...composition.contextPreparation?{context:composition.contextPreparation.materials}:{},...composition.storySnapshot?{story:composition.storySnapshot}:{}}),signal,
       onText:async delta=>{streamed=true;await gate.push(delta)},
     });
     signal?.throwIfAborted();if(!streamed)await gate.push(writer.text);
@@ -362,10 +366,24 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
   }
 
   return Object.freeze({
-    async present({ sessionId, contextKey, packet: input, baseModel, recentProse = [], signal } = {}) {
+    async draft({sessionId,receipt,instruction='',baseModel,signal,onText}={}){
+      if(!Array.isArray(receipt?.compiled?.messages))fail('DRAFT_UNAVAILABLE','No complete frozen writer snapshot exists',409);
+      if(typeof instruction!=='string')fail('INVALID_DRAFT','Writing guidance must be text');
+      const config=receipt.models?.render??(await modelsFor(sessionId,baseModel)).render;
+      const gate=thoughtGate(onText??(()=>{}));let streamed=false;
+      const result=await callModel({sessionId,stageId:STAGES.render,config,system:RENDER_SYSTEM+'\nThis is an unadopted expression-only candidate. Owner instruction cannot change resolved facts.',
+        input:snapshot({packet:receipt.packet,modules:receipt.compiled.messages,recentProse:receipt.recentProse??[],...receipt.contextPreparation?{context:receipt.contextPreparation.materials}:{},...receipt.storySnapshot?{story:receipt.storySnapshot}:{},instruction}),signal,
+        onText:async delta=>{streamed=true;signal?.throwIfAborted();await gate.push(delta);},
+      });
+      signal?.throwIfAborted();if(!streamed)await gate.push(result.text);
+      const text=await gate.end();if(!text.trim())fail('EMPTY_NARRATIVE','The writer returned no public narrative',502);
+      return {text};
+    },
+    async present({ sessionId, contextKey, packet: input, baseModel, recentProse = [], factReceiptId, story, openingText, signal } = {}) {
       nonempty(sessionId, 'Session id');
       nonempty(contextKey, 'Context key');
       const packet = normalizeDirectionPacket(input);
+      const storySnapshot=story===undefined?undefined:snapshot(story);
       if (!Array.isArray(recentProse) || recentProse.some((value) => typeof value !== 'string')) fail('INVALID_PUBLIC_PROSE', 'Recent prose must be explicitly public strings');
       let prose = snapshot(recentProse);
       const key = JSON.stringify([sessionId, contextKey]);
@@ -384,17 +402,23 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
         if (!selected) fail('BINDING_NOT_FOUND', 'No preset is bound to this session', 404);
         const binding = snapshot(selected);
         await checkCurrent(sessionId, initial.revision, binding);
-        const models = await modelsFor(sessionId, baseModel);
+        const models = openingText===undefined?await modelsFor(sessionId, baseModel):{};
         const actualModels = structuredClone(models);
         signal?.throwIfAborted();
         receipt = await receipts.create({
           sessionId, contextKey, status: 'prepared', stageId: STAGES.assemble, text: '',
           packet, recentProse: prose, profile: binding.profile, overlay: binding.overlay,
           revision: initial.revision, profileId: binding.profileId, profileVersion: binding.version,
-          profileHash: hash(binding.profile), models,
+          profileHash: hash(binding.profile), models,contextPreparation:null,...(factReceiptId?{factReceiptId}:{}),...(storySnapshot?{storySnapshot}:{}),
         });
         await emit({ sessionId, presentationId: receipt.id, stageId: STAGES.assemble, status: 'prepared', models });
-        const prepared = await prepareContext?.({sessionId,contextKey,packet,baseModel:resolveModelConfig(baseModel),signal});
+        if(openingText!==undefined){
+          nonempty(openingText,'Opening text');signal?.throwIfAborted();
+          receipt=await receipts.update(receipt.id,{status:'rendered',stageId:STAGES.render,text:openingText,compiled:{messages:[],text:'',diagnostics:[],blocked:false}});
+          await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'rendered'});
+          return publicReceipt(receipt);
+        }
+        const prepared = await prepareContext?.({sessionId,contextKey,presentationId:receipt.id,...(factReceiptId?{factReceiptId}:{}),...(storySnapshot?{story:storySnapshot}:{}),packet,baseModel:resolveModelConfig(baseModel),signal});
         const contextPreparation = prepared == null ? null : snapshot(prepared);
         if (contextPreparation) {
           if (!contextPreparation.materials || !Array.isArray(contextPreparation.materials.entries) || !Array.isArray(contextPreparation.materials.history)
@@ -413,7 +437,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
           signal?.throwIfAborted();
           receipt = await receipts.update(receipt.id, { assemblyAttempts: step + 1 });
           const result = await callModel({ sessionId, stageId: STAGES.assemble, config: models.assemble, system: ASSEMBLE_SYSTEM,
-            input: snapshot({ packet, ...(contextPreparation?{context:contextPreparation.materials}:{}), catalog: catalog(binding.profile, overlay), feedback, step: step + 1, maxSteps: maxAssemblySteps }), signal });
+            input: snapshot({ packet, ...(contextPreparation?{context:contextPreparation.materials}:{}),...(storySnapshot?{story:storySnapshot}:{}), catalog: catalog(binding.profile, overlay), feedback, step: step + 1, maxSteps: maxAssemblySteps }), signal });
           signal?.throwIfAborted();
           actualModels.assemble = actualConfig(models.assemble, result.config);
           receipt = await receipts.update(receipt.id, { models: actualModels });
@@ -450,7 +474,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
         }
         if (!committed) fail('ASSEMBLY_LIMIT', 'No valid preset composition was committed within the assembly limit', 409);
         signal?.throwIfAborted();
-        const composition = snapshot({ packet, profile: binding.profile, overlay, compiled, models: actualModels, recentProse: prose,contextPreparation });
+        const composition = snapshot({ packet, profile: binding.profile, overlay, compiled, models: actualModels, recentProse: prose,contextPreparation,...storySnapshot?{storySnapshot}:{} });
         receipt=await renderFrozen(receipt,composition,sessionId,signal);
         return publicReceipt(receipt);
       } catch (error) {
@@ -532,7 +556,7 @@ Return an owner-review draft and candid blockers, never ready/bind/execute. The 
         const previous=await receipts.findByContextKey(sessionId,contextKey);
         if(previous){if(DONE.has(previous.status))return publicReceipt(previous);fail('PRESENTATION_BUSY','This retry context already has an attempt',409)}
         if(!eligible.canRetry)fail(eligible.code,'This frozen presentation is not eligible for another retry',409);
-        const models=await modelsFor(sessionId,baseModel),frozen=snapshot({packet:original.packet,profile:original.profile,overlay:original.overlay,compiled:original.compiled,recentProse:original.recentProse??[],contextPreparation:original.contextPreparation,models});
+        const models=await modelsFor(sessionId,baseModel),frozen=snapshot({packet:original.packet,profile:original.profile,overlay:original.overlay,compiled:original.compiled,recentProse:original.recentProse??[],contextPreparation:original.contextPreparation,...original.factReceiptId?{factReceiptId:original.factReceiptId}:{},...original.storySnapshot?{storySnapshot:original.storySnapshot}:{},models});
         contexts=await activeContexts?.({sessionId});
         receipt=await receipts.create({...frozen,sessionId,contextKey,rewriteOf:original.id,status:'prepared',stageId:STAGES.render,text:'',profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash},{activeContexts:contexts});
         await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'prepared',models});
@@ -543,10 +567,11 @@ Return an owner-review draft and candid blockers, never ready/bind/execute. The 
 
     async commit({ sessionId, presentationId, seq } = {}) {
       const receipt = await owned(sessionId, presentationId);
-      if (receipt.status === 'complete') return publicReceipt(receipt);
+      if (receipt.status === 'complete') {await outcome(receipt,'accepted');return publicReceipt(receipt);}
       if (receipt.status !== 'rendered') fail('PRESENTATION_NOT_RENDERED', 'Only a rendered presentation can be committed', 409);
       if (seq !== undefined && (!Number.isSafeInteger(seq) || seq < 0)) fail('INVALID_SEQUENCE', 'Canonical sequence must be a nonnegative integer');
       const updated = await receipts.update(receipt.id, { status: 'complete', ...(seq === undefined ? {} : { seq }) });
+      await outcome(updated,'accepted');
       await emit({ sessionId, presentationId: receipt.id, stageId: STAGES.render, status: 'complete', committed: true, ...(seq === undefined ? {} : { seq }) });
       return publicReceipt(updated);
     },

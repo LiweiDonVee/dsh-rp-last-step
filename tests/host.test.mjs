@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createPresetStore } from '../src/store.mjs';
 import * as module from '../src/host.mjs';
+import {baseEvents} from './fixtures/narrative-events.mjs';
 const entry = (id, content, extra = {}) => ({ id, name: id, content, role: 'system', order: 0, enabled: true, required: false, locked: false, phase: 'render', ...extra });
 const ready = (entries = [entry('style', 'Use quiet prose.')]) => ({ id: 'preset', name: 'Preset', version: 1, status: 'ready', sourceId: null, entries });
 const packet = { playerAction: 'Try the gate', resolvedChanges: ['The attempt failed.'], visibleConsequences: ['The gate stays shut.'] };
@@ -162,6 +163,59 @@ async function bind(f, profile = ready()) {
   const saved = await f.host.saveProfile({ profile, expectedRevision: (await f.store.snapshot()).revision });
   await f.host.bindSession({ sessionId: 'story', profileId: saved.profileId, version: saved.version, expectedRevision: saved.revision });
 }
+
+test('GM opening receipt uses exact owner prose through the terminal receipt without any model call',async t=>{
+  const factReceipt={schemaVersion:1,id:'fact-opening',kind:'opening',openingText:'  Exact opening.\nOwner-selected.  ',packet:{playerAction:'Begin the story.'}};
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm-story'}),presentation:async input=>{assert.equal(input.factReceiptId,'fact-opening');assert.equal(input.agent.session.id,'story');return{factReceipt,packet:factReceipt.packet,story:{title:'The Gate'}}}}}});
+  await bind(f);
+  await assert.rejects(f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'legacy',packet}),{code:'FACT_RECEIPT_REQUIRED'});
+  const result=await f.ctxTools.get('rp_present').execute({factReceiptId:'fact-opening'},{agent:f.agents.get('story'),callId:'call-1',rootCallId:'call-1',signal:new AbortController().signal,concludeTurn(){}});
+  assert.equal(result.text,'  Exact opening.\nOwner-selected.  ');
+  assert.equal(result.status,'rendered');assert.equal(f.calls.length,0);
+  const material=await f.host.material({sessionId:'story',presentationId:result.id});
+  assert.deepEqual(material.packet,factReceipt.packet);assert.equal(material.status,'rendered');
+  assert.equal(material.contextPreparation,null);
+});
+
+test('ordinary GM receipt passes exact identities and story to frozen Context and accepted outcome',async t=>{
+  const outcomes=[],prepared=[],factReceipt={schemaVersion:1,id:'fact-turn',kind:'turn',packet};
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async()=>({factReceipt,packet,story:{title:'Gate',examples:'Short lines.'}})},rpContext:{prepare:async input=>{prepared.push(input);return{id:'material',authorNote:{id:'note',version:2,claimId:'claim'},materials:{entries:[],history:[],recentProse:[],guidance:'Author note: wait.'}}},presentationOutcome:async input=>outcomes.push(input)}}});
+  await bind(f);
+  const result=await f.ctxTools.get('rp_present').execute({factReceiptId:'fact-turn'},{agent:f.agents.get('story'),callId:'call-1',rootCallId:'call-1',signal:new AbortController().signal,concludeTurn(){}});
+  assert.equal(prepared[0].presentationId,result.id);assert.equal(prepared[0].factReceiptId,'fact-turn');assert.equal(prepared[0].story.title,'Gate');
+  f.ctx.emit('session/event',f.agents.get('story').session,{type:'tool/call',seq:10,data:{name:'rp_present',callId:'call-1'}});
+  f.ctx.emit('session/event',f.agents.get('story').session,{type:'tool/result',seq:11,data:{message:{role:'tool',source:{kind:'tool',callId:'call-1'},toolCallId:'call-1',isError:false,content:[{type:'text',text:result.text}]},meta:{rpLastStep:{schemaVersion:1,record:{...result,status:'complete'}}}}});
+  await f.ctx.flush();
+  assert.equal(outcomes.at(-1).presentationId,result.id);assert.equal(outcomes.at(-1).status,'accepted');
+  const material=await f.host.material({sessionId:'story',presentationId:result.id});
+  assert.equal(material.contextPreparation.authorNote.claimId,'claim');
+  await assert.rejects(f.host.material({sessionId:'denied',presentationId:result.id}),{code:'FORBIDDEN'});
+});
+
+test('authorized draft workflow reads actual narrative revisions and keeps candidates out of formal history',async t=>{
+  const f=await fixture(t,{stages:[{commit:true},'Accepted prose.','Alternative prose.']});await bind(f);
+  const result=await f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',packet});
+  await f.host.commit({sessionId:'story',presentationId:result.id,seq:5});
+  const events=baseEvents();events[3].data.message.id='assistant-1';events[3].data.message.content[0].id='call-1';events[4].data.callId='call-1';events[5].data.message.source.callId='call-1';events[5].data.message.toolCallId='call-1';events[5].data.message.content[0].text=result.text;events[5].data.meta.rpLastStep.record={...result,status:'complete'};
+  f.agents.get('story').session.snapshotEvents=()=>events;
+  const ref=(await f.host.narratives({sessionId:'story'})).records[0].ref,before=f.presentations.length,draftEvents=[];
+  f.ctx.on('rp-last-step/draft',event=>draftEvents.push(event));
+  const draft=await f.host.createDraft({sessionId:'story',basedOn:ref,instruction:'Shorter.'});
+  assert.equal(draft.text,'Alternative prose.');assert.equal(draft.basedOn.resultSeq,5);assert.equal(f.calls.length,3);assert.equal(f.presentations.length,before);
+  assert.equal((await f.host.narratives({sessionId:'story'})).records[0].text,'Accepted prose.');
+  assert.equal(draftEvents.at(-1).status,'ready');
+  const edit=await f.host.editDraft({sessionId:'story',draftId:draft.id,text:'Human wording.',expectedDraftVersion:draft.version});
+  assert.equal(edit.kind,'manual');assert.equal((await f.host.drafts({sessionId:'story'})).drafts[0].text,'Human wording.');
+  await assert.rejects(f.host.createDraft({sessionId:'denied',basedOn:{...ref,sessionId:'denied'}}),{code:'FORBIDDEN'});
+  await assert.rejects(f.host.createDraft({sessionId:'story',basedOn:{...ref,resultSeq:999}}),{code:'NARRATIVE_CONFLICT'});
+});
+
+test('GM story identity is frozen independently of optional Context for assembly and writer',async t=>{
+  const story={title:'The Gate',character:{name:'Mara',assetId:'actor',version:1},persona:{name:'Reader',description:'A careful visitor.'},examples:'Quiet speech.'};
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async()=>({factReceipt:{id:'fact',kind:'turn'},packet,story})}},stages:[request=>{const input=JSON.parse(request.messages[0].content[0].text);assert.equal(input.story.character.name,'Mara');story.character.name='Changed later';return{commit:true};},request=>{const input=JSON.parse(request.messages[0].content[0].text);assert.equal(input.story.character.name,'Mara');assert.equal(input.story.examples,'Quiet speech.');return'Frozen identity prose.';}]});
+  await bind(f);const result=await f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'story-input',factReceiptId:'fact'});
+  assert.equal(result.text,'Frozen identity prose.');
+});
 
 test('plugin apply provides its service and routes while returning a valid Cordis effect result', async (t) => {
   const f = await fixture(t, { plugin: true });

@@ -150,3 +150,12 @@ test('presenter failure or cancellation cannot conclude the main turn', async ()
   await assert.rejects(f.tools.get('rp_present').execute({ packet: { playerAction: 'Wait' } }, f.exec), { name: 'AbortError' });
   assert.equal(f.concluded(), 0);
 });
+
+test('terminal factReceiptId is exclusive and reaches the real presentation service',async()=>{
+  const f=fixture();module.registerRpLastStepAgent(f.ctx,f.service);const tool=f.tools.get('rp_present');
+  await tool.execute({factReceiptId:'fact-1'},f.exec);
+  assert.equal(f.calls[0][1].factReceiptId,'fact-1');
+  assert.equal(f.calls[0][1].packet,undefined);
+  assert.equal(f.concluded(),1);
+  for(const args of [{factReceiptId:''},{factReceiptId:'fact',packet:{playerAction:'Wait'}},{factReceiptId:'fact',rewriteOf:'failed'}])await assert.rejects(tool.execute(args,f.exec),{code:'INVALID_TOOL_ARGUMENTS'});
+});

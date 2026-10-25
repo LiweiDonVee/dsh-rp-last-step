@@ -42,6 +42,16 @@ test('dispatches only the exact owner library and session DTOs', async () => {
   assert.equal(f.calls.length, 9);
 });
 
+test('owner draft and material actions validate exact references and refuse hidden extra fields',async()=>{
+  const ref={sessionId:'story',presentationId:'receipt',assistantMessageId:'assistant',callSeq:4,baseResultSeq:5,resultSeq:5},calls=[];
+  const service=Object.fromEntries(['narratives','drafts','material','createDraft','editDraft','adoptDraft','retryPresentation'].map(action=>[action,async(input,signal)=>{calls.push({action,input,signal});return{ok:true};}]));
+  const routes=module.createRpLastStepRoutes(service);
+  for(const body of [{action:'narratives',sessionId:'story'},{action:'drafts',sessionId:'story'},{action:'material',sessionId:'story',presentationId:'receipt'},{action:'createDraft',sessionId:'story',basedOn:ref,instruction:'Shorter'},{action:'editDraft',sessionId:'story',draftId:'draft',text:'Wording',expectedDraftVersion:2},{action:'adoptDraft',sessionId:'story',draftId:'draft',expectedNarrative:ref},{action:'retryPresentation',sessionId:'story',presentationId:'failed'}])assert.equal((await routes.request(request(body))).status,200);
+  assert.equal(calls.length,7);
+  for(const body of [{action:'createDraft',sessionId:'story',basedOn:{...ref,resultSeq:undefined}},{action:'adoptDraft',sessionId:'story',draftId:'draft',expectedNarrative:ref,skipChecks:true},{action:'editDraft',sessionId:'story',draftId:'draft',text:'Words',expectedDraftVersion:0}])assert.equal((await routes.request(request(body))).status,400);
+  assert.equal(calls.length,7);
+});
+
 test('rejects unknown actions, extra fields and malformed required arguments before dispatch', async () => {
   const f = fixture();
   const routes = module.createRpLastStepRoutes(f.service);

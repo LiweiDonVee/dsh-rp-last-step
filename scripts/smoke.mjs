@@ -9,11 +9,13 @@ const root=process.cwd(),home=resolve(`.runtime/rp-step-smoke-${Date.now()}`),ev
 await mkdir(home,{recursive:true});await mkdir(evidence,{recursive:true})
 // The fixture is a server-only plugin, not a second source for our client.
 await writeFile(join(home,'package.json'),JSON.stringify({name:'rp-last-step-smoke-home',private:true,type:'module'}))
-const artifact='artifacts/dsh-rp-last-step-0.2.0.tgz',hash=createHash('sha256').update(await readFile(artifact)).digest('hex')
+const manifest=JSON.parse(await readFile('package.json','utf8'))
+const artifact=`artifacts/dsh-rp-last-step-${manifest.version}.tgz`,hash=createHash('sha256').update(await readFile(artifact)).digest('hex')
 await writeFile(join(evidence,'acceptance.json'),JSON.stringify({passed:false,status:'running',hash}))
 const cli=process.env.DSH_BIN??join(process.env.LOCALAPPDATA,'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'),quote=value=>process.platform==='win32'?`"${value}"`:value
 const env={...process.env,DSH_HOME:home,DEEPSEEK_API_KEY:'rp-step-smoke-placeholder-unused'}
-const invokeCli=args=>new Promise((done,reject)=>{const child=spawn(quote(cli),args,{shell:process.platform==='win32',windowsHide:true,env,cwd:root,stdio:'pipe'});let out='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>out+=b);child.on('error',reject);child.on('exit',code=>code===0?done():reject(Error('DSH fixture install failed '+out)))})
+const invokeCli=args=>new Promise((done,reject)=>{const child=spawn(quote(cli),args,{shell:process.platform==='win32',windowsHide:true,env,cwd:root,stdio:'pipe'});let out='';child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>out+=b);child.on('error',reject);child.on('exit',code=>code===0?done(out.trim()):reject(Error('DSH fixture install failed '+out)))})
+const hostVersion=await invokeCli(['--version'])
 for(const path of (standalone?[artifact]:[process.env.DSH_LOOP_TGZ,process.env.DSH_STUDIO_TGZ,artifact]))await invokeCli(['plugin','--profile','web','add',quote(resolve(path))])
 const probeFile=join(home,'native-probe.mjs');await writeFile(probeFile,await readFile('tests/fixtures/native-probe.mjs','utf8'))
 const patch=join(home,'probe.patch.yml')
@@ -98,7 +100,7 @@ try{
  if(await page.getByRole('combobox',{name:'模型',exact:true}).inputValue()!=='quality')throw Error('RP writer route missing from native Loop inspector')
  await page.screenshot({path:join(evidence,'rp-loop-integration.png')})
  if(errors.length)throw Error('Browser errors '+JSON.stringify(errors))
- const stats=await probe({action:'stats'}),result={passed:true,hash,host:'DSH 0.2.1-rc.2',worldCalls:two.worldCalls,mainCalls:two.calls.filter(c=>c.kind==='main').length,stageCalls:stats.calls.filter(c=>c.kind!=='main'),gmCount:gm.length,sourceUnchanged:true,frames:frames.map(frame=>({type:frame.type})),errors}
+ const stats=await probe({action:'stats'}),result={passed:true,hash,host:hostVersion,worldCalls:two.worldCalls,mainCalls:two.calls.filter(c=>c.kind==='main').length,stageCalls:stats.calls.filter(c=>c.kind!=='main'),gmCount:gm.length,sourceUnchanged:true,frames:frames.map(frame=>({type:frame.type})),errors}
  await writeFile(join(evidence,'acceptance.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result))
  }
 }catch(error){console.error(error.message);console.error(redact(logs.slice(-10000)));await writeFile(join(evidence,'acceptance.json'),JSON.stringify({passed:false,hash,error:redact(error.message)}));process.exitCode=1}

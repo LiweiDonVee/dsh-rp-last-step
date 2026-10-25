@@ -24,13 +24,13 @@ flowchart TD
 
 ## 安装
 
-已验证 **DSH 0.2.1-rc.2**。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。
+0.3 需要 **DSH 0.2.1-rc.3** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
 
-1. 从 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases/latest) 下载 `dsh-rp-last-step-0.2.0.tgz`。
+1. 从 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases/latest) 下载 `dsh-rp-last-step-0.3.0.tgz`。
 2. 完全退出 DSH，包括后台进程。在文件所在目录执行：
 
 ```powershell
-dsh plugin --profile desktop add ./dsh-rp-last-step-0.2.0.tgz
+dsh plugin --profile desktop add ./dsh-rp-last-step-0.3.0.tgz
 ```
 
 3. 重启 DSH，点击会话顶部的 **预设**，或从右侧新增页签导航打开 **RP 最后一步**。
@@ -39,10 +39,10 @@ Web 模式将 `desktop` 改为 `web`。不需要另开服务、安装 Node/pnpm 
 
 ```powershell
 $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'
-& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.2.0.tgz
+& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.3.0.tgz
 ```
 
-自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。发布页附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.2.0.tgz -Algorithm SHA256` 核对。
+自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。发布页附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.3.0.tgz -Algorithm SHA256` 核对。
 
 ## 从导入到第一轮正文
 

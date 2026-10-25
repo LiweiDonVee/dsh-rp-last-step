@@ -11,7 +11,7 @@ await writeFile(join(home,'package.json'),JSON.stringify({name:'rp-fullstack-smo
 const artifacts={
   database:resolve(process.env.DSH_DATABASE_TGZ??'../dsh-rp-database/artifacts/dsh-rp-database-0.1.0.tgz'),
   context:resolve(process.env.DSH_CONTEXT_TGZ??'../dsh-rp-context/artifacts/dsh-rp-context-0.1.0.tgz'),
-  lastStep:resolve('artifacts/dsh-rp-last-step-0.2.0.tgz'),
+  lastStep:resolve(`artifacts/dsh-rp-last-step-${JSON.parse(await readFile('package.json','utf8')).version}.tgz`),
   loop:resolve(process.env.DSH_LOOP_TGZ??'../dsh-loop-studio/artifacts/dsh-loop-studio-0.1.0.tgz'),
 }
 if(process.env.DSH_STUDIO_TGZ)artifacts.studio=resolve(process.env.DSH_STUDIO_TGZ)

@@ -10,6 +10,8 @@ import { createPresenter } from './presenter.mjs';
 import { registerRpLastStepAgent, requireNativeTools, usesNativeTools } from './agent.mjs';
 import { createRpLastStepRoutes } from './routes.mjs';
 import { activePresentationContexts } from './retry.mjs';
+import {readNarratives,requireLatestNarrative} from './narratives.mjs';
+import {createDraftStore} from './drafts.mjs';
 
 export const name = 'rp-last-step';
 export const inject = ['connection', 'typertGateway', 'agents', 'llm', 'tools', 'systemPrompt'];
@@ -70,6 +72,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
   const directory = options.directory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'app-data', 'rp-last-step');
   const store = options.store ?? await createPresetStore({ directory: join(directory, 'presets') });
   const receipts = options.receipts ?? await createReceiptStore({ directory: join(directory, 'presentations') });
+  const draftStore=await createDraftStore({directory:join(directory,'drafts')});
   const skillDirectory = options.skillDirectory ?? fileURLToPath(new URL('./skills/adapting-sillytavern-rp-presets/', import.meta.url));
   let skillText;
   let skillReference;
@@ -148,6 +151,30 @@ export async function createRpLastStepHost(ctx, options = {}) {
       try { await iterator?.return?.(); } catch { /* Closing the reader cannot replace its accepted result or safe error. */ }
     }
   }
+  async function narrativeEvents(id,agent,signal){
+    await readSession(id,signal);
+    const live=ctx.agents.get(id);
+    if(agent&&agent!==live)throw new PresetError('AGENT_MISMATCH','The caller does not own this session',403);
+    if(live?.session.snapshotEvents)return live.session.snapshotEvents();
+    const query=ctx.get?.('sessionQuery');
+    if(!query?.observeSession)throw new PresetError('NARRATIVE_UNAVAILABLE','The canonical session log is unavailable',503);
+    const view=await query.observeSession(id);try{return copy(view.events);}finally{view[Symbol.dispose]();}
+  }
+  async function frozenReceipt(id,presentationId,events){
+    const receipt=await receipts.get(presentationId);
+    if(receipt?.sessionId===id)return receipt;
+    const narrative=receipt&&readNarratives(id,events??await narrativeEvents(id)).find(record=>record.ref.presentationId===presentationId);
+    if(narrative){
+      let origin;try{origin=JSON.parse(receipt.contextKey);}catch{/* Old invalid identities cannot authorize an inherited snapshot. */}
+      const call=(events??[]).find(event=>event.seq===narrative.ref.callSeq);
+      if(origin?.[1]===narrative.ref.assistantMessageId&&origin[2]===call?.data.callId)return receipt;
+    }
+    throw new PresetError('RECEIPT_NOT_FOUND','Presentation record not found',404);
+  }
+  function draftProgress(event){
+    try{ctx.emit('rp-last-step/draft',event);}catch{/* Candidate observers do not own the writer. */}
+    notify(event.sessionId,{type:'draft',...event});
+  }
   function baseFor(id, supplied) {
     const agent = ctx.agents.get(id);
     if (supplied && supplied !== agent) throw new PresetError('AGENT_MISMATCH', 'The caller does not own this live session', 403);
@@ -209,6 +236,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
       if(!context)return null;
       return context.prepare({...input,agent:ctx.agents.get(input.sessionId)});
     },
+    presentationOutcome:input=>ctx.get?.('rpContext')?.presentationOutcome?.(input),
     ...(options.maxAssemblySteps === undefined ? {} : { maxAssemblySteps: options.maxAssemblySteps }),
     ...(options.maxMigrationAttempts === undefined ? {} : { maxMigrationAttempts: options.maxMigrationAttempts }),
   });
@@ -272,6 +300,35 @@ export async function createRpLastStepHost(ctx, options = {}) {
       const captured = copy(input);
       return run(signal, async () => { const source = await store.source(captured.sourceId); if (!source) throw new PresetError('SOURCE_NOT_FOUND', 'Original source is unavailable', 404); return { source }; });
     },
+    ensureBuiltinProfile:input=>run(input.signal,async()=>{const result=await store.ensureBuiltinProfile(input);await refreshBindings();changed();return result;}),
+    contentRevision:({signal}={})=>run(signal,async()=>({revision:(await store.snapshot()).revision})),
+    exportContent:input=>run(input.signal,()=>store.exportContent(input)),
+    importContent:input=>mutation(input.signal,()=>store.importContent(input)),
+    material(input,signal=input.signal){
+      const captured=copy({sessionId:input.sessionId,presentationId:input.presentationId});
+      return run(signal,async signal=>{
+        await readSession(captured.sessionId,signal);
+        const receipt=await frozenReceipt(captured.sessionId,captured.presentationId,await narrativeEvents(captured.sessionId,undefined,signal));
+        return {presentationId:receipt.id,packet:copy(receipt.packet),...(receipt.factReceiptId?{factReceiptRef:receipt.factReceiptId}:{}),contextPreparation:copy(receipt.contextPreparation??null),compiled:copy(receipt.compiled??null),models:copy(receipt.models??{}),status:receipt.status};
+      });
+    },
+    narratives(input,signal=input.signal){return run(signal,async combined=>({records:readNarratives(input.sessionId,await narrativeEvents(input.sessionId,input.agent,combined))}));},
+    drafts(input,signal=input.signal){return run(signal,async combined=>{await readSession(input.sessionId,combined);return{drafts:await draftStore.list(input.sessionId)};});},
+    createDraft(input,signal=input.signal){
+      const captured=copy({sessionId:input.sessionId,basedOn:input.basedOn,instruction:input.instruction});
+      return run(signal,async combined=>{
+        const events=await narrativeEvents(captured.sessionId,undefined,combined);requireLatestNarrative(captured.sessionId,events,captured.basedOn);
+        const receipt=await frozenReceipt(captured.sessionId,captured.basedOn.presentationId,events);
+        let draft=await draftStore.create({sessionId:captured.sessionId,basedOn:captured.basedOn,...receipt.factReceiptId?{factReceiptId:receipt.factReceiptId}:{},kind:'writer',status:'generating',text:''});
+        draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'generating'});
+        try{
+          const result=await presenter.draft({sessionId:captured.sessionId,receipt,instruction:captured.instruction,baseModel:baseFor(captured.sessionId),signal:combined,onText:delta=>draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'generating',delta})});
+          draft=await draftStore.finish({sessionId:captured.sessionId,draftId:draft.id,expectedDraftVersion:draft.version,status:'ready',text:result.text});
+          draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'ready'});return draft;
+        }catch(error){await draftStore.finish({sessionId:captured.sessionId,draftId:draft.id,expectedDraftVersion:draft.version,status:'failed',text:''});draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:'failed'});throw error;}
+      });
+    },
+    editDraft(input,signal=input.signal){const captured=copy({sessionId:input.sessionId,draftId:input.draftId,text:input.text,expectedDraftVersion:input.expectedDraftVersion});return run(signal,async combined=>{await readSession(captured.sessionId,combined);const draft=await draftStore.edit(captured);draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:draft.status});return draft;});},
     createProfile(input, signal) {
       const captured = copy(input);
       return mutation(signal, () => store.saveProfile(createProfile({ name: captured.name }), { expectedRevision: captured.expectedRevision }));
@@ -321,11 +378,20 @@ export async function createRpLastStepHost(ctx, options = {}) {
       return mutation(input.signal, async (combined) => { await bound(captured.sessionId, combined); combined.throwIfAborted(); return store.applyOperations(captured.sessionId, captured.operations, { expectedRevision: captured.expectedRevision }); }, captured.sessionId);
     },
     present(input) {
-      const captured = { sessionId: input.sessionId, contextKey: input.contextKey, packet: copy(input.packet), rewriteOf:input.rewriteOf,callId: input.callId };
+      const captured = { sessionId: input.sessionId, contextKey: input.contextKey, packet: copy(input.packet), factReceiptId:input.factReceiptId,rewriteOf:input.rewriteOf,callId: input.callId };
       return run(input.signal, async (combined) => {
         try {
           await bound(captured.sessionId, combined);
-          const result = captured.rewriteOf===undefined?await presenter.present({ sessionId: captured.sessionId, contextKey: captured.contextKey, packet: captured.packet, baseModel: baseFor(captured.sessionId, input.agent), signal: combined }):await presenter.rewrite({sessionId:captured.sessionId,contextKey:captured.contextKey,presentationId:captured.rewriteOf,baseModel:baseFor(captured.sessionId,input.agent),signal:combined});
+          let resolved;
+          const gm=ctx.get?.('rpGM');
+          if(captured.rewriteOf===undefined){
+            if(captured.factReceiptId!==undefined){
+              if(!gm?.presentation)throw new PresetError('GM_UNAVAILABLE','The fact receipt service is unavailable',503);
+              resolved=await gm.presentation({sessionId:captured.sessionId,agent:input.agent??ctx.agents.get(captured.sessionId),factReceiptId:captured.factReceiptId,signal:combined});
+              if(resolved.factReceipt.id!==captured.factReceiptId)throw new PresetError('INVALID_FACT_RECEIPT','The resolved fact receipt does not match',409);
+            }else if(await gm?.binding?.({sessionId:captured.sessionId,signal:combined}))throw new PresetError('FACT_RECEIPT_REQUIRED','This story requires its committed fact receipt before presentation',409);
+          }
+          const result = captured.rewriteOf===undefined?await presenter.present({ sessionId: captured.sessionId, contextKey: captured.contextKey, packet: resolved?.packet??captured.packet,...(resolved?{factReceiptId:captured.factReceiptId,story:resolved.story,...resolved.factReceipt.kind==='opening'?{openingText:resolved.factReceipt.openingText}:{}}:{}),baseModel: baseFor(captured.sessionId, input.agent), signal: combined }):await presenter.rewrite({sessionId:captured.sessionId,contextKey:captured.contextKey,presentationId:captured.rewriteOf,baseModel:baseFor(captured.sessionId,input.agent),signal:combined});
           if (captured.callId) presentations.set(callKey(captured.sessionId, captured.callId), result.id);
           return result;
         } catch (error) {

@@ -26,7 +26,7 @@
 | `rp_last_step_catalog` | `{}` | 取得当前目录、策略与 revision |
 | `rp_last_step_read` | `{entryIds: [id]}` | 按需读取模块正文 |
 | `rp_last_step_patch` | `{expectedRevision, operations}` | 原子修改本会话覆盖 |
-| `rp_present` | `{packet}` 或 `{rewriteOf}` | 独立生成正文；失败稿可用冻结材料只重试 writer |
+| `rp_present` | `{factReceiptId}`、`{packet}` 或 `{rewriteOf}`，互斥 | GM 事实回执呈现、旧会话公开包或冻结失败稿 writer 重试 |
 
 补丁操作是 `enable`、`disable`、`replace`、`fill`、`add`、`remove`。来源条目不能删除；remove 仅用于临时新增条目，新增条目只允许呈现阶段且不能冒充来源、必用或锁定条目。策略、阶段、绑定和源版本由 owner API 管理。
 
@@ -84,3 +84,15 @@ Studio 回放使用原始工具调用关联与 `sourceEventSeqs`，而不是仅�
 rp_last_step_catalog 的 presentations 只列出当前可重试失败记录。rp_present({rewriteOf:id}) 仍必须是唯一直接终止调用，只接受已失败/取消且已冻结编译结果的本会话稿件。它不再次运行 GM、模块组装或事实工具，也不覆盖成功稿件。
 
 原失败链的规范来源必须仍在当前有效分支。列表、执行及 receipt 原子预留共享资格判断；有效成功重试消耗该失败链，运行中的重试拒绝并发重复。若成功重试已被回退，则按当前活跃来源重新判断；没有以永久标记锁死旧失败记录。正文成功后仍需规范工具结果接受，才进入正式叙事。
+
+## 0.3 事实回执、正文修订与内容服务
+
+GM 绑定会话用 `rp_present({factReceiptId})` 读取可选 `rpGM.presentation` 的已提交事实；开场逐字返回 owner 选择，不调用 writer。普通回合将脱离复制的 `storySnapshot` 与方向包分别冻结，传给可选 Context、组装模型和 writer。旧会话继续使用 packet。
+
+`rpLastStep.narratives({sessionId,agent?,signal?})` 按有效 surface 和完整 call/result 来源链返回 NarrativeRecord。ref 包含 sessionId、presentationId、assistantMessageId、callSeq、baseResultSeq、resultSeq，修订键为 `JSON.stringify([presentationId,resultSeq])`。实际正文读取有效 message.content；原 meta.text 只标识原始执行档案。压缩保留原来源，回退替换排除失效分支。
+
+owner `createDraft/editDraft/drafts` 保存独立候选，写作只复用已冻结 receipt 的 packet、compiled、contextPreparation 和 storySnapshot。草稿进度使用 `rp-last-step/draft`；SSE 仅发送有限元数据。候选不修改正式 history。`material` 读取已保存输入并校验会话访问，不重新查询数据库。
+
+作者注结果通知以 compiled writer snapshot 冻结为界：组装前失败释放 claim；writer 失败保留原 claim，成功重试提交实际 presentationId 和原 claimId。只有规范接受才消费，重复通知幂等。
+
+plugin-only `ensureBuiltinProfile({key,profile:{name,entries}})` 建立 immutable ready 默认版本；冲突拒绝，后续 owner 编辑另存新版本。`contentRevision/exportContent/importContent` 提供内容包接缝；导入分配新 ID、保留原文与策略、强制 draft，并按 requestId 幂等。

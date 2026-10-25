@@ -10,7 +10,7 @@ pnpm check
 pnpm package
 ```
 
-`check` 运行零 warning lint、Node 宿主/内核测试、Vitest React UI 测试和 host/client 生产构建。`package` 生成 `artifacts/dsh-rp-last-step-0.1.0.tgz` 与 `SHA256SUMS.txt`。
+`check` 运行零 warning lint、Node 宿主/内核测试、Vitest React UI 测试和 host/client 生产构建。`package` 生成 `artifacts/dsh-rp-last-step-0.3.0.tgz` 与 `SHA256SUMS.txt`。
 
 构建会将 `skills/adapting-sillytavern-rp-presets/` 复制到 `dist/skills/`，宿主注册这份标准 skill 正文与资源目录。发布包包含打包后的 host、ModuleLoader client、skill、manifest、Cordis patch、README 和许可证；开发依赖不进入安装要求。
 
@@ -18,7 +18,7 @@ UI 测试在 `tests/ui/`，Node 测试在 `tests/*.test.mjs`，两者分开运�
 
 ## 单插件原生验收
 
-安装官方 DSH 0.2.1-rc.2 和 Playwright Chromium：
+安装官方 DSH 0.2.1-rc.3 和 Playwright Chromium：
 
 ```powershell
 pnpm exec playwright install chromium
