@@ -24,11 +24,19 @@ export function createRpLastStepApi(send = (...args) => globalThis.fetch(...args
     bind: (sessionId, input, signal) => request('bindSession', { sessionId, ...input }, signal),
     preview: (profile, input, signal) => request('preview', { profile, ...input }, signal),
     migrate: (sessionId, input, signal) => request('migrate', { sessionId, ...input }, signal),
+    narratives:(sessionId,signal)=>request('narratives',{sessionId},signal),
+    presentationSummaries:(sessionId,signal)=>request('presentationSummaries',{sessionId},signal),
+    drafts:(sessionId,signal)=>request('drafts',{sessionId},signal),
+    createDraft:(sessionId,input,signal)=>request('createDraft',{sessionId,...input},signal),
+    editDraft:(sessionId,input,signal)=>request('editDraft',{sessionId,...input},signal),
+    adoptDraft:(sessionId,input,signal)=>request('adoptDraft',{sessionId,...input},signal),
+    retryPresentation:(sessionId,presentationId,signal)=>request('retryPresentation',{sessionId,presentationId},signal),
+    material:(sessionId,presentationId,signal)=>request('material',{sessionId,presentationId},signal),
     subscribe(sessionId, onEvent, onError) {
       const url = new URL('api/rp-last-step/events', document.baseURI)
       url.searchParams.set('sessionId', sessionId ?? '')
       const source = new EventSource(url)
-      for (const type of ['connected', 'changed', 'stage']) source.addEventListener(type, event => {
+      for (const type of ['connected', 'changed', 'stage','draft']) source.addEventListener(type, event => {
         let data
         try { data = JSON.parse(event.data) } catch { return }
         if (data?.sessionId === sessionId) onEvent({ ...data, type })

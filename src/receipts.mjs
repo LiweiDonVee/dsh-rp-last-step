@@ -11,6 +11,12 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu;
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const clone = (value) => structuredClone(value);
 
+export function publicStorySnapshot(value){
+  if(!record(value))return undefined;
+  const pick=(input,keys)=>Object.fromEntries(keys.filter(key=>key==='version'?Number.isSafeInteger(input?.[key])&&input[key]>0:typeof input?.[key]==='string').map(key=>[key,clone(input[key])]));
+  return{...pick(value,['title','examples']),...record(value.character)?{character:pick(value.character,['assetId','version','name','description','personality','scenario'])}:{},...record(value.persona)?{persona:pick(value.persona,['assetId','version','name','description'])}:{}};
+}
+
 export function publicReceipt(value) {
   if (!value) return null;
   const result = {};
@@ -36,6 +42,7 @@ export async function createReceiptStore({ directory } = {}) {
   const sessions = join(root, 'sessions');
   await mkdir(records, { recursive: true });
   await mkdir(sessions, { recursive: true });
+  let mutationGate=work=>work();
 
   function serial(work) {
     const pending = (queues.get(root) ?? Promise.resolve()).then(work);
@@ -78,11 +85,13 @@ export async function createReceiptStore({ directory } = {}) {
     indexFile(value.sessionId);
   }
   return Object.freeze({
+    setMutationGate(gate){mutationGate=gate;},
+    drain:()=>serial(()=>{}),
     async create(input,options={}) {
       const captured = clone(input);
       const contexts=clone(options.activeContexts);
       validate(captured);
-      return serial(async () => {
+      return serial(() => mutationGate(async () => {
         const existingRecords=await list(captured.sessionId);
         if (captured.contextKey !== undefined && existingRecords.some((value) => value.contextKey === captured.contextKey)) {
           throw new PresetError('PRESENTATION_BUSY', 'This context already has a presentation attempt', 409);
@@ -98,21 +107,21 @@ export async function createReceiptStore({ directory } = {}) {
         await write(join(records, `${value.id}.json`), value);
         await write(index, [...ids, value.id]);
         return clone(value);
-      });
+      }));
     },
     async get(id) { return serial(async () => clone(await get(id))); },
     async update(id, patch) {
       const captured = clone(patch);
       if (!record(captured)) throw new PresetError('INVALID_RECEIPT', 'A receipt patch is required');
       if (['id', 'sessionId', 'contextKey', 'createdAt'].some((key) => Object.hasOwn(captured, key))) throw new PresetError('RECEIPT_IDENTITY_IMMUTABLE', 'Presentation identity cannot be changed', 403);
-      return serial(async () => {
+      return serial(() => mutationGate(async () => {
         const current = await get(id);
         if (!current) throw new PresetError('RECEIPT_NOT_FOUND', 'Presentation record not found', 404);
         const next = { ...current, ...captured };
         validate(next);
         await write(join(records, `${id}.json`), next);
         return clone(next);
-      });
+      }));
     },
     async list(sessionId) { return serial(async () => clone(await list(sessionId))); },
     async findByContextKey(sessionId, contextKey) {

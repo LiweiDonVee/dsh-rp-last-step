@@ -46,6 +46,10 @@ pnpm smoke -- --integration
 
 ## 修改与发布
 
+0.3 原生回归使用 `pnpm smoke:drafts`，需要先 `pnpm package`。可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指向已缓存 Chromium；`DSH_LAST_STEP_EVIDENCE` 指定证据目录，默认 `.runtime/last-step-drafts-evidence/`。脚本独立临时 home 安装实际 tgz，执行手改／采用／受限重试 UI、fork、冷重启，再在第二个 home 通过公开 persistence 导入 exact Session 和本插件 state，验证零历史调用与再次 fork。Context 使用明确合同夹具，GM 使用本地事实工具；这不是完整 GM/Database/Context/Studio 组合或付费模型质量验收。
+
+`tests/owner-state.test.mjs` 注入 before-switch、between-renames、after-install 故障；所有恢复文件都在随机测试 owner namespace。aggregate revision 与旧 preset revision 域、候选／canonical drain、Session ancestry、restore 冲突和审计读取均有 focused Node 覆盖。旧组合脚本和 `fullstack-acceptance.md` 的 rc.2 范围是历史记录。
+
 权限修改应同时检查操作接口、编译器与批量原子性；模型流程修改应检查准备配置与实际调用一致、取消和重复提交，以及失败后是否重复执行事实工具。
 
 迁移的源元数据只供迁移使用，不应泄漏到 writer。skill 变化可对照 [已有行为演练](skill-evaluation.md)，并用合成成功、失败、锁冲突和未知宏案例检验。不要将真实用户预设提交为测试 fixture。

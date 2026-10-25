@@ -100,3 +100,23 @@ owner `createDraft/editDraft/drafts` 保存独立候选，写作复用已冻结 
 作者注结果通知以 compiled writer snapshot 冻结为界：组装前失败释放 claim；writer 失败保留原 claim，成功重试提交实际 presentationId 和原 claimId。只有规范接受才消费，重复通知幂等。
 
 plugin-only `ensureBuiltinProfile({key,profile:{name,entries}})` 建立 immutable ready 默认版本；冲突拒绝，后续 owner 编辑另存新版本。`contentRevision/exportContent/importContent` 提供内容包接缝；导入分配新 ID、保留原文与策略、强制 draft，并按 requestId 幂等。
+
+## 原生 owner 操作与统一列表
+
+`adoptDraft({sessionId,draftId,expectedNarrative,expectedDraftVersion,signal?})` 通过 owner `commands/execute`（wire 字段 agentId）注册命令和公开 Agent.followup 建立真实回合。临时 pre-step 监听器只匹配该 inbox 请求 ID／turn；在序列化候选版本 guard 内再次核对版本和有效正文，再只替换 tool/result 的 message.content。原 data/meta 保持不变，sources 为原 call seq 和被替换 result seq。维护回合由宿主以 blocked 结束，命令单独确认采用成功；取消、错误和 unload 都释放监听器并等待 handler 退出。
+
+`retryPresentation` 使用同一原生命令通道。匹配请求后安装该 Agent 的公开 monotonic tools.guard，执行器仅允许单个 rp_present 调用且参数恰为所选 rewriteOf。其他工具、嵌套调用、新 packet／factReceiptId 和错误 ID 均拒绝。最多一次主模型派发；缺少合法终止调用时以失败结束，不再次请求模型。writer 仍使用既有失败链资格与原冻结材料。
+
+`presentationSummaries({sessionId,signal?})` 返回 body-free `{presentations,capabilities:{retryDispatch}}`。每行包含 presentationId/status/createdAt/canRetry 及可选安全 retryBlockCode/errorCode/factReceiptId/rewriteOf。canRetry 与实际执行共用 retryEligibility；retryDispatch 只在就绪原生绑定、空闲 Agent、命令通道及受支持 guard 可用时为 true。旧 state(id) 的 id 字段及形状保持兼容。
+
+material 的可选 storySnapshot 是该 receipt 冻结并安全投影的固定角色、persona、示例；不读取当前绑定，不夹带导入扩展。候选 models 在手改后表示原生成来源。UI 的未保存或过期 preview 不会静默升级为新版本。
+
+## 分支和 LastStep 状态恢复
+
+`inheritSession` 验证实际 parentSession 和 authoritative inheritedEventCount 对应的逐事件父前缀；仅初始化未绑定 child。优先使用 child 前缀最后正式 receipt 的 profile/overlay，没有组合时才取父 pinned profile 加空 overlay。继承材料仍要求真实祖先关系及有效规范 root；失败 retry 家族保持会话独立。
+
+plugin-only `exportState/preflightRestore/restoreState` 只管理 LastStep 依赖数据：所需 source/profile 版本、binding、冻结 receipt 和 versioned drafts。preflight 可在 Session 导入前做结构和碰撞检查；restore 在公开宿主导入并冷验证后读取实际目标 Session，验证 accepted source 和候选 ref，拒绝凭 receipt 制造历史。
+
+恢复 gate 拒绝新的 LastStep 操作／admission，drain 已有 writer、候选、canonical handler 及 store 队列。staging 保留自身 root 的无关数据；外置 `.rp-last-step-owner.json` 先记 intent，再分两次目录 rename。两步是可恢复提交，不宣称单 OS 原子动作；启动先恢复，再打开 handles／缓存。进程内读取看到完整状态或 busy，不承诺任意外部文件读者的原子视图。
+
+contentRevision 是 preset/receipt/draft/restore 的持久 aggregate，写前 reserve generation，稳定读取等待短 storage gate。旧 state.revision 和预设编辑 expectedRevision 仍属 preset-local 域；新 importContent/restoreState 在同一 gate 比较 aggregate，不能混用两域。requestId 异 payload 返回 REQUEST_ID_CONFLICT；restoreId 异 payload／Session 集合返回 RESTORE_ID_CONFLICT。同 payload 重试复用映射。StoryKit 负责 Session／跨插件协调，本插件不写其他状态所有者。

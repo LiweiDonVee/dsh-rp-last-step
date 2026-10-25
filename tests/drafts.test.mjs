@@ -29,3 +29,11 @@ test('completed writer candidates expose safe actual model evidence and preserve
   const manual=await store.edit({sessionId:'story',draftId:first.id,expectedDraftVersion:finished.version,text:'Human wording.'});assert.equal(manual.kind,'manual');assert.deepEqual(manual.models,finished.models);
   const restarted=await module.createDraftStore({directory});assert.equal((await restarted.list('story'))[0].text,'Human wording.');assert.deepEqual((await restarted.list('story'))[0].models,finished.models);
 });
+
+test('the previewed version guard holds edits until its synchronous canonical replacement finishes',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'rpls-draft-guard-'));t.after(()=>rm(directory,{recursive:true,force:true}));const store=await module.createDraftStore({directory});
+  const draft=await store.create({sessionId:'story',basedOn:baseRef(),kind:'manual',text:'Previewed text.',status:'ready'});
+  await store.edit({sessionId:'story',draftId:draft.id,expectedDraftVersion:1,text:'New unseen text.'});let applied=false;
+  await assert.rejects(store.withVersion({sessionId:'story',draftId:draft.id,expectedDraftVersion:1},()=>{applied=true}),{code:'DRAFT_VERSION_CONFLICT'});assert.equal(applied,false);
+  const value=await store.withVersion({sessionId:'story',draftId:draft.id,expectedDraftVersion:2},current=>current.text);assert.equal(value,'New unseen text.');
+});

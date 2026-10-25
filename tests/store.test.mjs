@@ -44,8 +44,20 @@ test('content transfer preserves source and policy under new IDs with durable re
   const restarted=await createPresetStore({directory});
   assert.deepEqual(await restarted.importContent({...incoming,requestId:'pack:profile:1',expectedRevision:1}),first);
   incoming.profile.name='Changed';
-  await assert.rejects(store.importContent({...incoming,requestId:'pack:profile:1',expectedRevision:first.revision}),{code:'REQUEST_CONFLICT'});
+  await assert.rejects(store.importContent({...incoming,requestId:'pack:profile:1',expectedRevision:first.revision}),{code:'REQUEST_ID_CONFLICT'});
   assert.equal((await store.snapshot()).revision,first.revision);
+});
+
+test('captured fork bindings preserve an existing child and validate inherited policy atomically',async t=>{
+  const {store}=await temporaryStore(t),profile=readyProfile();profile.entries[0].locked=false;
+  await store.saveProfile(profile,{expectedRevision:0});
+  const captured={entries:{style:{content:'At the fork prefix'}},additions:[]};
+  const first=await store.bindCapturedSession('child',{profileId:profile.id,version:1,overlay:captured,expectedRevision:1});
+  assert.equal((await store.binding('child')).overlay.entries.style.content,'At the fork prefix');
+  assert.deepEqual(await store.bindCapturedSession('child',{profileId:profile.id,version:1,overlay:{entries:{style:{content:'Later parent'}},additions:[]},expectedRevision:1}),first);
+  assert.equal((await store.binding('child')).overlay.entries.style.content,'At the fork prefix');
+  await assert.rejects(store.bindCapturedSession('foreign',{profileId:profile.id,version:1,overlay:{entries:{style:{enabled:false}},additions:[]},expectedRevision:first.revision}),{code:'ENTRY_REQUIRED'});
+  assert.equal(await store.binding('foreign'),null);assert.equal((await store.snapshot()).revision,first.revision);
 });
 
 test('sources roundtrip exactly after restart and imported profiles remain draft', async (t) => {

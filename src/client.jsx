@@ -1,49 +1,20 @@
-import React, {useEffect,useState} from 'react'
+import React, {useState} from 'react'
 import {PresetWorkspace,Quill} from './PresetWorkspace.jsx'
 import {createRpLastStepApi} from './api.js'
+import {PresentationWorkspace} from './PresentationWorkspace.jsx'
 import css from './styles.css'
 
 export const inject=['slots','sidebarRight','sidebarRightTabs']
 export const TAB_ID='dsh-rp-last-step/workspace'
 export const TAB_KIND='rp-last-step'
 const api=createRpLastStepApi()
-const phaseName={'rp-last-step.migrate':'预设迁移','rp-last-step.assemble':'模块热组装','rp-last-step.render':'正文呈现'}
 
 function OpenButton({open,story=false}) {
   return <button className="rpls-open-entry" type="button" aria-label={story?'配置故事预设':'打开 RP 最后一步'} title={story?'配置故事预设':'RP 预设与呈现'} onClick={open}><Quill/><span>{story?'故事预设':'预设'}</span></button>
 }
 
 export function PresentationRecords({sessionId,visible,client=api}) {
-  const [records,setRecords]=useState([]),[error,setError]=useState(''),[progress,setProgress]=useState('')
-  useEffect(()=>{
-    if(!visible||!sessionId)return
-    const controller=new AbortController();let loading=false,again=false
-    const refresh=async()=>{
-      if(loading){again=true;return} loading=true
-      do {
-        again=false
-        try{const state=await client.state(sessionId,controller.signal);if(!controller.signal.aborted){setRecords(state.presentations??[]);setError('')}}
-        catch(cause){if(!controller.signal.aborted)setError(cause.message)}
-      }while(again&&!controller.signal.aborted)
-      loading=false
-    }
-    setRecords([]);setError('');setProgress('');void refresh()
-    const close=client.subscribe(sessionId,event=>{
-      if(controller.signal.aborted)return
-      if(event.type==='stage'){
-        setProgress(['complete','failed','cancelled'].includes(event.status)?'':phaseName[event.stageId]??'正在处理')
-        if(['complete','failed','cancelled','rendered'].includes(event.status))void refresh()
-      }else void refresh()
-    },()=>{if(!controller.signal.aborted)setProgress('正在重新同步')})
-    return()=>{controller.abort();close()}
-  },[sessionId,visible,client])
-  const completed=records.filter(record=>record.status==='complete')
-  return <section className="rpls-records" aria-label="本会话生成记录">
-    <header><h2>生成记录</h2><p>本会话已提交的正文稿件，按生成时间排列。</p></header>
-    {progress&&<p role="status">{progress}…</p>}{error&&<p role="alert">{error}</p>}
-    {!completed.length&&<p className="rpls-record-empty">尚未提交正文。在当前故事应用就绪预设后，Agent 完成处理并调用最后一步，稿件会显示在这里。</p>}
-    {completed.map(record=><article key={record.id}><div className="rpls-record-meta"><span>{new Date(record.createdAt).toLocaleString()}</span><span>预设版本 {record.profileVersion}</span>{record.truncated&&<span>达到输出上限</span>}</div><div className="rpls-record-text">{record.text}</div></article>)}
-  </section>
+  return <PresentationWorkspace sessionId={sessionId} visible={visible} client={client}/>
 }
 
 function LastStepWorkspace({sessionId,visible}) {

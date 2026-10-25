@@ -2,16 +2,21 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {isDeepStrictEqual} from 'node:util';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import { PresetError, compileProfile, createProfile, emptyOverlay, importSillyTavern } from './core.mjs';
 import { createPresetStore } from './store.mjs';
-import { createReceiptStore, publicReceipt } from './receipts.mjs';
+import { createReceiptStore, publicReceipt,publicStorySnapshot } from './receipts.mjs';
 import { createModelCaller, resolveModelConfig } from './models.mjs';
 import { createPresenter } from './presenter.mjs';
 import { registerRpLastStepAgent, requireNativeTools, usesNativeTools } from './agent.mjs';
 import { createRpLastStepRoutes } from './routes.mjs';
-import { activePresentationContexts } from './retry.mjs';
+import { activePresentationContexts,retryEligibility } from './retry.mjs';
 import {readNarratives,requireLatestNarrative} from './narratives.mjs';
 import {createDraftStore} from './drafts.mjs';
+import {createOwnerOperations} from './adoption.mjs';
+import {createOwnerState} from './owner-state.mjs';
+import {readOwnedState,selectState,preflightState,validateCanonicalState,mergeState,stateFingerprint} from './transfer.mjs';
 
 export const name = 'rp-last-step';
 export const inject = ['connection', 'typertGateway', 'agents', 'llm', 'tools', 'systemPrompt'];
@@ -70,9 +75,11 @@ export const LOOP_PARTICIPANT = freeze({
 /** Public adapters only: preset state, isolated presentation and owner Remote reads. */
 export async function createRpLastStepHost(ctx, options = {}) {
   const directory = options.directory ?? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'app-data', 'rp-last-step');
-  const store = options.store ?? await createPresetStore({ directory: join(directory, 'presets') });
-  const receipts = options.receipts ?? await createReceiptStore({ directory: join(directory, 'presentations') });
-  const draftStore=await createDraftStore({directory:join(directory,'drafts')});
+  const ownerState=await createOwnerState({directory});
+  let store = options.store ?? await createPresetStore({ directory: join(directory, 'presets') });
+  let receipts = options.receipts ?? await createReceiptStore({ directory: join(directory, 'presentations') });
+  let draftStore=await createDraftStore({directory:join(directory,'drafts')});
+  const attachStorageGate=()=>{for(const handle of[store,receipts,draftStore])handle.setMutationGate(ownerState.write);};attachStorageGate();await ownerState.ensureFloor((await store.snapshot()).revision);
   const skillDirectory = options.skillDirectory ?? fileURLToPath(new URL('./skills/adapting-sillytavern-rp-presets/', import.meta.url));
   let skillText;
   let skillReference;
@@ -97,15 +104,40 @@ export async function createRpLastStepHost(ctx, options = {}) {
   const pendingCalls = new Map();
   const presentations = new Map();
   const turns = new Map();
+  const workScope=new AsyncLocalStorage(),ownerJobs=new Set(),canonicalJobs=new Set(),gateWaiters=new Set(),drainingAgents=new Map(),transferSessions=new Set();
+  let transferPhase='open',exclusiveQueue=Promise.resolve();
 
   function active() { if (stopped) throw new PresetError('UNAVAILABLE', 'RP presentation has been unloaded', 503); }
-  async function run(signal, work) {
+  async function run(signal, work,admission={}) {
     active();
+    const admitted=workScope.getStore()?.admitted||admission.internal||admission.agent&&drainingAgents.has(admission.agent);
+    if(transferPhase!=='open'&&!(transferPhase==='draining'&&admitted))throw new PresetError('OWNER_STATE_BUSY','LastStep is capturing or restoring a stable state; retry after it finishes',409);
     const lifetime = new AbortController();
     operations.add(lifetime);
     const combined = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
-    try { combined.throwIfAborted(); const value = await work(combined); combined.throwIfAborted(); return value; }
-    finally { operations.delete(lifetime); }
+    let finish;const completion=new Promise(resolve=>{finish=resolve;});ownerJobs.add(completion);
+    try { return await workScope.run({admitted:true},async()=>{combined.throwIfAborted();const value=await work(combined);combined.throwIfAborted();return value;}); }
+    finally { operations.delete(lifetime);ownerJobs.delete(completion);finish(); }
+  }
+  async function until(promise,signal){let stop;const aborted=new Promise((_resolve,reject)=>{stop=()=>reject(new DOMException('Transfer cancelled','AbortError'));signal.addEventListener('abort',stop,{once:true});});try{signal.throwIfAborted();return await Promise.race([promise,aborted]);}finally{signal.removeEventListener('abort',stop);}}
+  function waitForStorage(){if(!['exclusive','recovery'].includes(transferPhase))return Promise.resolve();return new Promise((resolve,reject)=>gateWaiters.add({resolve,reject}));}
+  function trackCanonical(owned,work){const pending=owned?workScope.run({admitted:true},work):work();if(owned){canonicalJobs.add(pending);void pending.then(()=>canonicalJobs.delete(pending),()=>canonicalJobs.delete(pending));}return pending;}
+  function sessionSet(input){if(!Array.isArray(input)||!input.length||input.some(id=>typeof id!=='string'||!id.trim()||id.length>256)||new Set(input).size!==input.length)throw new PresetError('RESTORE_PAYLOAD_INVALID','A nonempty set of Session IDs is required',409);return copy(input);}
+  async function sessionFamily(ids,signal){const sessions=new Map(),queue=[...ids];for(let index=0;index<queue.length;index++){const id=queue[index];if(sessions.has(id))continue;const snapshot=await canonicalSession(id,undefined,signal);sessions.set(id,snapshot);if(snapshot.header.parentSession)queue.push(snapshot.header.parentSession);}return sessions;}
+  function exclusive(ids,signal,kind,work){
+    const lifetime=new AbortController(),combined=signal?AbortSignal.any([signal,lifetime.signal]):lifetime.signal;operations.add(lifetime);
+    const job=exclusiveQueue.then(async()=>{
+      active();combined.throwIfAborted();if(transferPhase!=='open')throw new PresetError('OWNER_STATE_BUSY','LastStep recovery is required before another transfer',409);
+      if(kind==='export'&&ids.some(id=>ctx.agents.get(id)?.status==='running'))throw new PresetError('EXPORT_CHANGED','Export requires idle stories',409);
+      transferPhase='draining';for(const id of ids)transferSessions.add(id);for(const agent of ctx.agents.list())if(agent.status==='running'&&(bindings.has(agent.id)||ids.includes(agent.id)))drainingAgents.set(agent,agent.session.snapshotEvents?.().findLast(event=>event.type==='turn/start')?.data.turn);
+      try{
+        await until(Promise.allSettled([...drainingAgents.keys()].map(agent=>agent.whenIdle())),combined);
+        while(ownerJobs.size||canonicalJobs.size)await until(Promise.allSettled([...ownerJobs,...canonicalJobs]),combined);
+        await Promise.all([store.drain(),receipts.drain(),draftStore.drain()]);await ownerState.read();combined.throwIfAborted();transferPhase='exclusive';
+        return await work(combined);
+      }finally{drainingAgents.clear();transferSessions.clear();transferPhase=await ownerState.recoveryPending()?'recovery':'open';if(transferPhase==='open'){for(const waiter of gateWaiters)waiter.resolve();gateWaiters.clear();}}
+    });
+    exclusiveQueue=job.then(()=>undefined,()=>undefined);void exclusiveQueue.then(()=>operations.delete(lifetime));return job;
   }
   async function refreshBindings() {
     const snapshot = await store.snapshot();
@@ -151,24 +183,35 @@ export async function createRpLastStepHost(ctx, options = {}) {
       try { await iterator?.return?.(); } catch { /* Closing the reader cannot replace its accepted result or safe error. */ }
     }
   }
-  async function narrativeEvents(id,agent,signal){
+  async function canonicalSession(id,agent,signal){
     await readSession(id,signal);
     const live=ctx.agents.get(id);
     if(agent&&agent!==live)throw new PresetError('AGENT_MISMATCH','The caller does not own this session',403);
-    if(live?.session.snapshotEvents)return live.session.snapshotEvents();
+    if(live?.session.snapshotEvents)return{header:copy(live.session.header),events:live.session.snapshotEvents(),inheritedEventCount:live.session.inheritedEventCount};
     const query=ctx.get?.('sessionQuery');
     if(!query?.observeSession)throw new PresetError('NARRATIVE_UNAVAILABLE','The canonical session log is unavailable',503);
-    const view=await query.observeSession(id);try{return copy(view.events);}finally{view[Symbol.dispose]();}
+    const view=await query.observeSession(id);try{return{header:copy(view.header),events:copy(view.events),inheritedEventCount:view.inheritedEventCount};}finally{view[Symbol.dispose]();}
+  }
+  async function narrativeEvents(id,agent,signal){return(await canonicalSession(id,agent,signal)).events;}
+  async function descendsFrom(child,ancestor,signal){
+    const seen=new Set([child.header.id]);
+    while(child.header.parentSession){
+      const parentId=child.header.parentSession;if(seen.has(parentId))return false;seen.add(parentId);
+      const parent=await canonicalSession(parentId,undefined,signal),count=child.inheritedEventCount;
+      if(!Number.isSafeInteger(count)||count<0||count>child.events.length||count>parent.events.length||!child.events.slice(0,count).every((event,index)=>isDeepStrictEqual(event,parent.events[index])))return false;
+      if(parentId===ancestor)return true;child=parent;
+    }
+    return false;
   }
   async function frozenReceipt(id,presentationId,events){
     const receipt=await receipts.get(presentationId);
     if(receipt?.sessionId===id)return receipt;
-    if(receipt&&events===undefined)events=await narrativeEvents(id);
+    if(receipt){const child=await canonicalSession(id);if(!await descendsFrom(child,receipt.sessionId))throw new PresetError('RECEIPT_NOT_FOUND','Presentation record not found',404);events=child.events;}
     const narrative=receipt&&readNarratives(id,events).find(record=>record.ref.presentationId===presentationId);
     if(narrative){
       let origin;try{origin=JSON.parse(receipt.contextKey);}catch{/* Old invalid identities cannot authorize an inherited snapshot. */}
       const call=(events??[]).find(event=>event.seq===narrative.ref.callSeq);
-      if(origin?.[1]===narrative.ref.assistantMessageId&&origin[2]===call?.data.callId)return receipt;
+      if(origin?.[0]===receipt.sessionId&&origin[1]===narrative.ref.assistantMessageId&&origin[2]===call?.data.callId)return receipt;
     }
     throw new PresetError('RECEIPT_NOT_FOUND','Presentation record not found',404);
   }
@@ -240,7 +283,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     try { ctx.emit('rp-last-step/presentation', event); } catch { /* Public progress listeners are observers. */ }
     notify(event.sessionId, { ...event, type: 'stage' });
   }
-  const presenter = createPresenter({ store, receipts, callModel, resolveModels, publish, skillText: skill.content, skillReference,
+  const makePresenter = () => createPresenter({ store, receipts, callModel, resolveModels, publish, skillText: skill.content, skillReference,
     activeContexts:({sessionId})=>{
       const session=ctx.agents.get(sessionId)?.session;
       return session?.snapshotEvents?activePresentationContexts(sessionId,session.snapshotEvents()):[];
@@ -254,6 +297,32 @@ export async function createRpLastStepHost(ctx, options = {}) {
     ...(options.maxAssemblySteps === undefined ? {} : { maxAssemblySteps: options.maxAssemblySteps }),
     ...(options.maxMigrationAttempts === undefined ? {} : { maxMigrationAttempts: options.maxMigrationAttempts }),
   });
+  let presenter=makePresenter();
+  async function retrySource(id,presentationId,agent=ctx.agents.get(id)){
+    const records=await receipts.list(id),original=records.find(record=>record.id===presentationId),contexts=activePresentationContexts(id,agent?.session.snapshotEvents?.()??[]),eligible=retryEligibility(records,original,contexts);
+    if(!eligible.canRetry)throw new PresetError(eligible.code,'This frozen presentation is no longer eligible for retry',409);
+    return original;
+  }
+  const ownerOperations=createOwnerOperations(ctx,{
+    prepare:async({kind,request,agent,signal})=>{
+      signal.throwIfAborted();if(ctx.agents.get(agent.id)!==agent||!service.isEnabled(agent.id))throw new PresetError('BINDING_NOT_FOUND','The native story binding is no longer available',409);
+      if(kind==='retry'){await retrySource(agent.id,request.presentationId,agent);return{};}
+      const draft=await draftStore.get({sessionId:agent.id,draftId:request.draftId});
+      if(draft.version!==request.expectedDraftVersion||draft.status!=='ready')throw new PresetError('DRAFT_VERSION_CONFLICT','The previewed candidate changed before adoption; reload it',409);
+      const narrative=requireLatestNarrative(agent.id,agent.session.snapshotEvents(),request.expectedNarrative);
+      if(!['sessionId','presentationId','assistantMessageId','callSeq','baseResultSeq'].every(key=>draft.basedOn[key]===narrative.ref[key]))throw new PresetError('NARRATIVE_CONFLICT','The candidate belongs to a different factual turn',409);
+      return{narrative,text:draft.text};
+    },
+    withDraftVersion:({request,agent},work)=>draftStore.withVersion({sessionId:agent.id,draftId:request.draftId,expectedDraftVersion:request.expectedDraftVersion},work),
+    complete:async({request,agent,turn})=>{
+      const events=agent.session.snapshotEvents(),narrative=readNarratives(agent.id,events).findLast(record=>{
+        const base=events.find(event=>event.seq===record.ref.baseResultSeq);return base?.data.turn===turn&&base.data.meta?.rpLastStep?.record?.rewriteOf===request.presentationId;
+      });
+      if(!narrative)throw new PresetError('RETRY_DISPATCH_FAILED','The native request did not produce an accepted retry; no facts were rerun',409);
+      await presenter.commit({sessionId:agent.id,presentationId:narrative.ref.presentationId,seq:narrative.ref.baseResultSeq});
+      return{sourceEventSeq:narrative.ref.baseResultSeq};
+    },
+  });
   async function bound(id, signal) {
     await readSession(id, signal);
     await refreshBindings();
@@ -262,8 +331,8 @@ export async function createRpLastStepHost(ctx, options = {}) {
     requireNativeTools(ctx, ctx.agents.get(id));
     return binding;
   }
-  async function mutation(signal, work, id) {
-    return run(signal, async (combined) => { const result = await work(combined); await refreshBindings(); changed(id); return result; });
+  async function mutation(signal, work, id,admission) {
+    return run(signal, async (combined) => { const result = await work(combined); await refreshBindings(); changed(id); return result; },admission);
   }
   const service = {
     isEnabled(id) {
@@ -315,18 +384,58 @@ export async function createRpLastStepHost(ctx, options = {}) {
       return run(signal, async () => { const source = await store.source(captured.sourceId); if (!source) throw new PresetError('SOURCE_NOT_FOUND', 'Original source is unavailable', 404); return { source }; });
     },
     ensureBuiltinProfile:input=>run(input.signal,async()=>{const result=await store.ensureBuiltinProfile(input);await refreshBindings();changed();return result;}),
-    contentRevision:({signal}={})=>run(signal,async()=>({revision:(await store.snapshot()).revision})),
+    contentRevision:({signal}={})=>run(signal,()=>ownerState.read(revision=>({revision}))),
+    async exportState(input){
+      const ids=sessionSet(input.sessionIds);
+      for(const id of ids){const snapshot=await canonicalSession(id,undefined,input.signal);if(snapshot.header.parentSession&&!await store.binding(id)&&await store.binding(snapshot.header.parentSession))await service.inheritSession({parentSessionId:snapshot.header.parentSession,sessionId:id,signal:input.signal});}
+      return exclusive(ids,input.signal,'export',async signal=>{
+        const sessions=await sessionFamily(ids,signal),captured=await ownerState.read(async revision=>({revision,raw:await readOwnedState(directory)})),payload=selectState(captured.raw,ids,sessions);validateCanonicalState(payload,sessions);
+        return{schemaVersion:1,revision:captured.revision,payload};
+      });
+    },
+    preflightRestore(input){const ids=sessionSet(input.sessionIds),state=copy(input.state);return run(input.signal,()=>ownerState.read(async()=>preflightState(await readOwnedState(directory),ids,state)));},
+    async restoreState(input){
+      if(!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0)throw new PresetError('EXPECTED_REVISION_REQUIRED','A nonnegative aggregate content revision is required',409);
+      const ids=sessionSet(input.sessionIds),restoreId=input.restoreId;let state;
+      try{state=copy(input.state);if(!object(state)||!Number.isSafeInteger(state.schemaVersion)||state.schemaVersion<1||!Number.isSafeInteger(state.revision)||state.revision<0||!object(state.payload))throw Error('Invalid restore envelope');JSON.stringify(state);}catch{throw new PresetError('RESTORE_PAYLOAD_INVALID','A serializable versioned LastStep state is required',409);}
+      if(typeof restoreId!=='string'||!restoreId.trim())throw new PresetError('RESTORE_PAYLOAD_INVALID','A restore operation ID is required',409);
+      const hash=stateFingerprint(ids,state);
+      return exclusive(ids,input.signal,'restore',async signal=>{
+        const raw=await ownerState.read(()=>readOwnedState(directory)),previous=Object.hasOwn(raw.transfers.jobs,restoreId)?raw.transfers.jobs[restoreId]:null;
+        if(previous){if(previous.hash!==hash)throw new PresetError('RESTORE_ID_CONFLICT','The restore ID identifies different payload or Sessions',409);return copy(previous.result);}
+        const preview=preflightState(raw,ids,state);if(!preview.supported)throw new PresetError(preview.conflicts[0].code,'The saved LastStep content has a conflict or missing requirement',409);
+        const sessions=await sessionFamily(ids,signal);validateCanonicalState(state.payload,sessions);signal.throwIfAborted();
+        const result=await ownerState.switchRoot({expectedRevision:input.expectedRevision,build:async(stage,generation)=>{
+          const restored=await mergeState(stage,raw,state,{restoreId,sessionIds:ids,generation,hash}),merged=await readOwnedState(stage),check=preflightState(merged,ids,state);if(!check.supported)throw new PresetError('RESTORE_PAYLOAD_INVALID','Staged LastStep data failed validation',409);return restored;
+        }});
+        store=await createPresetStore({directory:join(directory,'presets')});receipts=await createReceiptStore({directory:join(directory,'presentations')});draftStore=await createDraftStore({directory:join(directory,'drafts')});attachStorageGate();presenter=makePresenter();admissions.clear();await refreshBindings();for(const id of ids)changed(id);return result;
+      });
+    },
+    inheritSession(input){const captured=copy({parentSessionId:input.parentSessionId,sessionId:input.sessionId});return run(input.signal,async signal=>{
+      const child=await canonicalSession(captured.sessionId,undefined,signal);
+      if(child.header.parentSession!==captured.parentSessionId||!await descendsFrom(child,captured.parentSessionId,signal))throw new PresetError('SESSION_ANCESTRY_REQUIRED','The target is not a verified child prefix of this parent',409);
+      if(await store.binding(captured.sessionId))return{revision:(await store.snapshot()).revision};
+      const latest=readNarratives(captured.sessionId,child.events).filter(record=>record.ref.baseResultSeq<child.inheritedEventCount).at(-1);
+      let composition;
+      if(latest){const receipt=await frozenReceipt(captured.sessionId,latest.ref.presentationId,child.events);composition={profileId:receipt.profileId,version:receipt.profileVersion,overlay:receipt.overlay};}
+      else{const parent=await store.binding(captured.parentSessionId);if(!parent)throw new PresetError('BINDING_NOT_FOUND','The parent has no pinned profile to inherit',409);composition={profileId:parent.profileId,version:parent.version,overlay:emptyOverlay()};}
+      const result=await store.bindCapturedSession(captured.sessionId,{...composition,expectedRevision:(await store.snapshot()).revision});await refreshBindings();changed(captured.sessionId);return result;
+    });},
     exportContent:input=>run(input.signal,()=>store.exportContent(input)),
-    importContent:input=>mutation(input.signal,()=>store.importContent(input)),
+    importContent:input=>mutation(input.signal,()=>{if(!Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0)throw new PresetError('EXPECTED_REVISION_REQUIRED','A nonnegative content revision is required');return store.importContent({...input,expectedContentRevision:input.expectedRevision});}),
     material(input,signal=input.signal){
       const captured=copy({sessionId:input.sessionId,presentationId:input.presentationId});
       return run(signal,async signal=>{
         await readSession(captured.sessionId,signal);
         const receipt=await frozenReceipt(captured.sessionId,captured.presentationId);
-        return {presentationId:receipt.id,packet:copy(receipt.packet),...(receipt.factReceiptId?{factReceiptRef:receipt.factReceiptId}:{}),contextPreparation:copy(receipt.contextPreparation??null),compiled:copy(receipt.compiled??null),models:copy(receipt.models??{}),status:receipt.status};
+        return {presentationId:receipt.id,packet:copy(receipt.packet),...(receipt.factReceiptId?{factReceiptRef:receipt.factReceiptId}:{}),...receipt.storySnapshot?{storySnapshot:publicStorySnapshot(receipt.storySnapshot)}:{},contextPreparation:copy(receipt.contextPreparation??null),compiled:copy(receipt.compiled??null),models:copy(receipt.models??{}),status:receipt.status};
       });
     },
     narratives(input,signal=input.signal){return run(signal,async combined=>({records:readNarratives(input.sessionId,await narrativeEvents(input.sessionId,input.agent,combined))}));},
+    presentationSummaries(input,signal=input.signal){return run(signal,async combined=>{
+      await readSession(input.sessionId,combined);const records=await receipts.list(input.sessionId),agent=ctx.agents.get(input.sessionId),contexts=activePresentationContexts(input.sessionId,agent?.session.snapshotEvents?.()??[]);
+      return{presentations:records.map(record=>{const eligible=retryEligibility(records,record,contexts);return{presentationId:record.id,status:record.status,createdAt:record.createdAt,canRetry:eligible.canRetry,...eligible.canRetry?{}:{retryBlockCode:eligible.code},...typeof record.errorCode==='string'&&/^[A-Z][A-Z0-9_]{0,79}$/u.test(record.errorCode)?{errorCode:record.errorCode}:{},...typeof record.factReceiptId==='string'?{factReceiptId:record.factReceiptId}:{},...typeof record.rewriteOf==='string'?{rewriteOf:record.rewriteOf}:{}};}),capabilities:{retryDispatch:service.isEnabled(input.sessionId)&&ownerOperations.capable(agent,'retry')}};
+    });},
     drafts(input,signal=input.signal){return run(signal,async combined=>{await readSession(input.sessionId,combined);return{drafts:await draftStore.list(input.sessionId)};});},
     createDraft(input,signal=input.signal){
       const captured=copy({sessionId:input.sessionId,basedOn:input.basedOn,instruction:input.instruction,kind:input.kind??'writer',text:input.text});
@@ -346,6 +455,16 @@ export async function createRpLastStepHost(ctx, options = {}) {
       });
     },
     editDraft(input,signal=input.signal){const captured=copy({sessionId:input.sessionId,draftId:input.draftId,text:input.text,expectedDraftVersion:input.expectedDraftVersion});return run(signal,async combined=>{await readSession(captured.sessionId,combined);const draft=await draftStore.edit(captured);draftProgress({sessionId:captured.sessionId,draftId:draft.id,status:draft.status});return draft;});},
+    adoptDraft(input,signal=input.signal){const captured=copy({sessionId:input.sessionId,draftId:input.draftId,expectedNarrative:input.expectedNarrative,expectedDraftVersion:input.expectedDraftVersion});return run(signal,async combined=>{
+      if(!Number.isSafeInteger(captured.expectedDraftVersion)||captured.expectedDraftVersion<1)throw new PresetError('DRAFT_VERSION_CONFLICT','The previewed candidate version is required',409);
+      await readSession(captured.sessionId,combined);
+      const dispatch=await ownerOperations.run({kind:'adopt',sessionId:captured.sessionId,request:captured,signal:combined});
+      if(dispatch.result?.kind!=='success')throw new PresetError('ADOPTION_REJECTED',dispatch.result?.text??'The candidate was not adopted',409);
+      const records=readNarratives(captured.sessionId,await narrativeEvents(captured.sessionId,undefined,combined)),narrative=records.find(record=>record.ref.resultSeq===dispatch.result.sourceEventSeq);
+      if(!narrative)throw new PresetError('ADOPTION_REJECTED','The canonical adopted result could not be confirmed',409);
+      changed(captured.sessionId);return{narrative};
+    });},
+    retryPresentation(input,signal=input.signal){const captured=copy({sessionId:input.sessionId,presentationId:input.presentationId});return run(signal,async combined=>{await readSession(captured.sessionId,combined);await retrySource(captured.sessionId,captured.presentationId);const result=await ownerOperations.run({kind:'retry',sessionId:captured.sessionId,request:captured,signal:combined});changed(captured.sessionId);return result;});},
     createProfile(input, signal) {
       const captured = copy(input);
       return mutation(signal, () => store.saveProfile(createProfile({ name: captured.name }), { expectedRevision: captured.expectedRevision }));
@@ -378,7 +497,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     },
     catalog(input) {
       const captured = { sessionId: input.sessionId, signal: input.signal };
-      return run(captured.signal, async (combined) => { const binding = await bound(captured.sessionId, combined); return { revision: (await store.snapshot()).revision, profileId: binding.profileId, version: binding.version, entries: entriesFor(binding).map((entry) => publicEntry(entry)),presentations:(await presenter.state(captured.sessionId)).filter(item=>item.canRetry).map(item=>({id:item.id,status:item.status,canRetry:true})) }; });
+      return run(captured.signal, async (combined) => { const binding = await bound(captured.sessionId, combined); return { revision: (await store.snapshot()).revision, profileId: binding.profileId, version: binding.version, entries: entriesFor(binding).map((entry) => publicEntry(entry)),presentations:(await presenter.state(captured.sessionId)).filter(item=>item.canRetry).map(item=>({id:item.id,status:item.status,canRetry:true})) }; },{agent:input.agent});
     },
     read(input) {
       const captured = { sessionId: input.sessionId, entryIds: copy(input.entryIds), signal: input.signal };
@@ -388,11 +507,11 @@ export async function createRpLastStepHost(ctx, options = {}) {
         const entries = entriesFor(binding);
         const selected = [...new Set(captured.entryIds)].map((id) => { const entry = entries.find((item) => item.id === id); if (!entry) throw new PresetError('UNKNOWN_ENTRY', 'The selected module is unavailable', 404); return publicEntry(entry, true); });
         return { revision: (await store.snapshot()).revision, entries: selected };
-      });
+      },{agent:input.agent});
     },
     patch(input) {
       const captured = { sessionId: input.sessionId, expectedRevision: input.expectedRevision, operations: copy(input.operations) };
-      return mutation(input.signal, async (combined) => { await bound(captured.sessionId, combined); combined.throwIfAborted(); return store.applyOperations(captured.sessionId, captured.operations, { expectedRevision: captured.expectedRevision }); }, captured.sessionId);
+      return mutation(input.signal, async (combined) => { await bound(captured.sessionId, combined); combined.throwIfAborted(); return store.applyOperations(captured.sessionId, captured.operations, { expectedRevision: captured.expectedRevision }); }, captured.sessionId,{agent:input.agent});
     },
     present(input) {
       const captured = { sessionId: input.sessionId, contextKey: input.contextKey, packet: copy(input.packet), factReceiptId:input.factReceiptId,rewriteOf:input.rewriteOf,callId: input.callId };
@@ -422,10 +541,10 @@ export async function createRpLastStepHost(ctx, options = {}) {
           if (!stopped && !receipt) await publish({ sessionId: captured.sessionId, stageId: 'rp-last-step.render', status: error?.name === 'AbortError' ? 'cancelled' : 'failed', code: error instanceof PresetError ? error.code : 'PRESENTATION_FAILED' });
           throw error;
         } finally { await refreshBindings(); changed(captured.sessionId); }
-      });
+      },{agent:input.agent});
     },
-    commit: (input) => presenter.commit(input),
-    fail: (input) => presenter.fail(input),
+    commit: (input) => run(undefined,()=>presenter.commit(input),{internal:true}),
+    fail: (input) => run(undefined,()=>presenter.fail(input),{internal:true}),
     subscribe(id, listener) {
       active(); sessionId(id);
       const listeners = subscribers.get(id) ?? new Set();
@@ -436,6 +555,9 @@ export async function createRpLastStepHost(ctx, options = {}) {
       if (stopped) return;
       stopped = true;
       for (const controller of [...reads, ...operations]) controller.abort();
+      for(const waiter of gateWaiters)waiter.reject(new DOMException('LastStep unloaded','AbortError'));gateWaiters.clear();
+      await ownerOperations.close();
+      await exclusiveQueue;
       for (const dispose of disposers.splice(0).reverse()) await dispose();
       for (const dispose of optionalDisposers) await dispose();
       subscribers.clear(); bindings.clear(); admissions.clear(); pendingCalls.clear(); presentations.clear(); turns.clear();
@@ -444,6 +566,11 @@ export async function createRpLastStepHost(ctx, options = {}) {
 
   agentAdapter = registerRpLastStepAgent(ctx, service);
   disposers.push(agentAdapter);
+  disposers.push(ctx.on('agent/pre-step',(proposal,next)=>{
+    if(transferPhase==='open'||!bindings.has(proposal.agent.id)&&!transferSessions.has(proposal.agent.id))return next();
+    if(transferPhase==='draining'&&drainingAgents.has(proposal.agent)){const captured=drainingAgents.get(proposal.agent);if(captured===undefined){drainingAgents.set(proposal.agent,proposal.turn);return next();}if(captured===proposal.turn)return next();}
+    return{kind:'reject'};
+  }));
   disposers.push(ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     if (stopped || frame.type !== 'start' || ctx.agents.get(agent.session.id) !== agent) return;
     const id = agent.session.id;
@@ -455,7 +582,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     turn.requested = true;
     if (service.isEnabled(id)) turn.required = true;
   }));
-  disposers.push(ctx.on('session/event', async (session, event) => {
+  const observeSessionEvent=async (session, event) => {
     if (stopped) return;
     const id = session.id;
     if (event.type === 'turn/start') {
@@ -496,6 +623,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     // Start after canonical publication; observers never append session events.
     await Promise.resolve();
     try {
+      await waitForStorage();
       if (event.data.message?.isError === true) {
         if (presentationId) await presenter.fail({ sessionId: id, presentationId, error: new PresetError('TOOL_RESULT_REJECTED', 'The presentation tool result was not accepted', 409) });
         return;
@@ -503,19 +631,21 @@ export async function createRpLastStepHost(ctx, options = {}) {
       if (!accepted) return;
       await presenter.commit({ sessionId: id, presentationId: record.id, seq: event.seq });
     } catch { /* Foreign, stale or rejected canonical metadata cannot complete a receipt. */ }
-  }));
+  };
+  disposers.push(ctx.on('session/event',(session,event)=>trackCanonical(event.type==='tool/result'&&pendingCalls.has(callKey(session.id,event.data?.message?.source?.callId)),()=>observeSessionEvent(session,event))));
   disposers.push(ctx.on('agent/disposed', ({ agent }) => {
     if (admissions.get(agent.session.id)?.agent === agent) admissions.delete(agent.session.id);
     if (turns.get(agent.session.id)?.session === agent.session) turns.delete(agent.session.id);
   }));
-  disposers.push(ctx.on('tools/result', async (exec, result) => {
+  const observeToolResult=async (exec, result) => {
     if (stopped || exec.name !== 'rp_present' || result.isError !== true) return;
     const id = exec.agent?.session?.id;
     const presentationId = presentations.get(callKey(id, exec.callId));
     if (!presentationId) return;
-    try { await presenter.fail({ sessionId: id, presentationId, error: new PresetError('TOOL_RESULT_REJECTED', 'The presentation tool result was not accepted', 409) }); }
+    try { await waitForStorage();await presenter.fail({ sessionId: id, presentationId, error: new PresetError('TOOL_RESULT_REJECTED', 'The presentation tool result was not accepted', 409) }); }
     catch { /* Error normalization does not expose provider details. */ }
-  }));
+  };
+  disposers.push(ctx.on('tools/result',(exec,result)=>trackCanonical(exec.name==='rp_present'&&result.isError===true,()=>observeToolResult(exec,result))));
 
   function optional(names, install) {
     const register = (child) => {
@@ -534,6 +664,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     else if (names.every((name) => ctx.get?.(name))) register(Object.fromEntries(names.map((name) => [name, ctx.get(name)])));
   }
   optional(['skills'], (child) => child.skills.register({ name: skillName, description: skill.description, content: skill.content, source: 'bundled', resourceBase: { kind: 'directory', path: skillDirectory } }));
+  optional(['commands'],child=>ownerOperations.connect(child.commands));
   optional(['loopStudio'], (child) => {
     const studio = child.loopStudio;
     const unregister = studio.registerParticipant(copy(LOOP_PARTICIPANT));

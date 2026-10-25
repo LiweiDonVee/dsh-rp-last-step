@@ -10,7 +10,7 @@ const fields = {
   createProfile: ['name', 'expectedRevision'], importSillyTavern: ['rawText', 'name', 'orderCharacterId', 'expectedRevision'],
   saveProfile: ['profile', 'expectedRevision'], bindSession: ['sessionId', 'profileId', 'version', 'expectedRevision'],
   preview: ['profile', 'sessionId', 'phase', 'variables'], migrate: ['sessionId', 'profileId', 'version', 'expectedRevision'],
-  narratives:['sessionId'],drafts:['sessionId'],material:['sessionId','presentationId'],createDraft:['sessionId','basedOn','instruction','kind','text'],editDraft:['sessionId','draftId','text','expectedDraftVersion'],adoptDraft:['sessionId','draftId','expectedNarrative'],retryPresentation:['sessionId','presentationId'],
+  narratives:['sessionId'],presentationSummaries:['sessionId'],drafts:['sessionId'],material:['sessionId','presentationId'],createDraft:['sessionId','basedOn','instruction','kind','text'],editDraft:['sessionId','draftId','text','expectedDraftVersion'],adoptDraft:['sessionId','draftId','expectedNarrative','expectedDraftVersion'],retryPresentation:['sessionId','presentationId'],
 };
 const writes = new Set(['createProfile', 'importSillyTavern', 'saveProfile', 'bindSession', 'migrate']);
 const failure = (status, code, message, diagnostics) => Response.json({ error: { code, message, ...(diagnostics === undefined ? {} : { diagnostics }) } }, { status, headers: { 'cache-control': 'no-store' } });
@@ -38,13 +38,13 @@ function valid(input) {
   if (['saveProfile', 'preview'].includes(input.action) && !object(input.profile)) return false;
   if (input.action === 'preview' && (!['agent', 'render'].includes(input.phase) || (input.sessionId !== undefined && !id(input.sessionId))
     || (input.variables !== undefined && (!object(input.variables) || Object.values(input.variables).some((value) => typeof value !== 'string'))))) return false;
-  if(['narratives','drafts','material','createDraft','editDraft','adoptDraft','retryPresentation'].includes(input.action)&&!id(input.sessionId))return false;
+  if(['narratives','presentationSummaries','drafts','material','createDraft','editDraft','adoptDraft','retryPresentation'].includes(input.action)&&!id(input.sessionId))return false;
   if(['material','retryPresentation'].includes(input.action)&&!id(input.presentationId))return false;
   if(['editDraft','adoptDraft'].includes(input.action)&&!id(input.draftId))return false;
   if(input.action==='createDraft'&&(!validNarrativeRef(input.basedOn)||input.basedOn.sessionId!==input.sessionId||input.instruction!==undefined&&typeof input.instruction!=='string'))return false;
   if(input.action==='createDraft'&&(input.kind!==undefined&&!['writer','manual'].includes(input.kind)||input.text!==undefined&&(input.kind!=='manual'||typeof input.text!=='string'||!input.text.trim())))return false;
   if(input.action==='editDraft'&&(typeof input.text!=='string'||!input.text.trim()||!version(input.expectedDraftVersion)))return false;
-  if(input.action==='adoptDraft'&&(!validNarrativeRef(input.expectedNarrative)||input.expectedNarrative.sessionId!==input.sessionId))return false;
+  if(input.action==='adoptDraft'&&(!validNarrativeRef(input.expectedNarrative)||input.expectedNarrative.sessionId!==input.sessionId||!version(input.expectedDraftVersion)))return false;
   return true;
 }
 

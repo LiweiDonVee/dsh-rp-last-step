@@ -65,7 +65,7 @@ async function fixture(t, options = {}) {
     const scope = { own: id === 'story' ? ctxTools : new Map(), denials: new Set(), mode: options.toolModes?.[id], ...extra };
     const agent = {
       id, options: { provider: 'local', model: 'base', reasoningEffort: 'high' },
-      session: { id, header: { id }, requestHeader: () => ({ config: { provider: 'local', model: 'main-header', reasoningEffort: 'high', maxTokens: 500 } }),
+      session: { id, header: { id }, inheritedEventCount:0, requestHeader: () => ({ config: { provider: 'local', model: 'main-header', reasoningEffort: 'high', maxTokens: 500 } }),
         snapshotEvents: () => [], deriveMessages: () => [{ id: 'assistant-1', role: 'assistant', content: [{ type: 'tool-call', name: 'rp_present', id: 'call-1', arguments: '{}' }] }],
         append: () => { throw new Error('Session observers must never append'); },
       },
@@ -222,6 +222,20 @@ test('fresh superseded fact receipt errors propagate without creating presentati
   assert.equal(f.calls.length,0);assert.deepEqual((await f.host.state('story')).presentations,[]);
 });
 
+test('presentation summaries use centralized active-family eligibility and truthful native retry capability',async t=>{
+  const registered=new Map(),f=await fixture(t,{stages:[{commit:true},new Error('writer unavailable')],services:{commands:{register:definition=>{registered.set(definition.name,definition);return()=>registered.delete(definition.name);}}}});await bind(f);
+  const events=baseEvents();events[3].data.message.id='assistant-1';events[3].data.message.content[0].id='call-1';f.agents.get('story').session.snapshotEvents=()=>events;
+  await assert.rejects(f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',packet}));
+  const state=await f.host.state('story'),result=await f.host.presentationSummaries({sessionId:'story'}),summary=result.presentations[0];
+  assert.equal(summary.presentationId,state.presentations[0].id);assert.equal(summary.status,'failed');assert.equal(summary.canRetry,true);assert.equal(summary.errorCode,'MODEL_CALL_FAILED');assert.equal(summary.text,undefined);assert.equal(summary.packet,undefined);assert.equal(result.capabilities.retryDispatch,false);assert.equal(state.presentations[0].presentationId,undefined);
+  const agent=f.agents.get('story');agent.status='idle';agent.followup=()=>{};agent.whenIdle=async()=>{};agent.ctx.tools.guard=()=>()=>{};f.ctx.typertGateway.invoke=async()=>({});
+  assert.equal((await f.host.presentationSummaries({sessionId:'story'})).capabilities.retryDispatch,true);agent.status='running';assert.equal((await f.host.presentationSummaries({sessionId:'story'})).capabilities.retryDispatch,false);agent.status='idle';
+  events.push({seq:7,type:'user/message',surfaceOp:{op:'replace',startSeq:2,endSeq:5},data:{source:{kind:'runtime-context'}}});
+  const inactive=(await f.host.presentationSummaries({sessionId:'story'})).presentations[0];assert.equal(inactive.canRetry,false);assert.equal(inactive.retryBlockCode,'REWRITE_SOURCE_INACTIVE');
+  await assert.rejects(f.host.retryPresentation({sessionId:'story',presentationId:summary.presentationId}),{code:'REWRITE_SOURCE_INACTIVE'});
+  await assert.rejects(f.host.presentationSummaries({sessionId:'denied'}),{code:'FORBIDDEN'});
+});
+
 test('GM opening receipt uses exact owner prose through the terminal receipt without any model call',async t=>{
   const factReceipt={schemaVersion:1,id:'fact-opening',kind:'opening',openingText:'  Exact opening.\nOwner-selected.  ',packet:{playerAction:'Begin the story.'}};
   const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm-story'}),presentation:async input=>{assert.equal(input.factReceiptId,'fact-opening');assert.equal(input.agent.session.id,'story');return{factReceipt,packet:factReceipt.packet,story:{title:'The Gate'}}}}}});
@@ -304,6 +318,8 @@ test('authorized draft workflow reads actual narrative revisions and keeps candi
   assert.equal(draftEvents.at(-1).status,'ready');
   const edit=await f.host.editDraft({sessionId:'story',draftId:draft.id,text:'Human wording.',expectedDraftVersion:draft.version});
   assert.equal(edit.kind,'manual');assert.equal((await f.host.drafts({sessionId:'story'})).drafts[0].text,'Human wording.');
+  await assert.rejects(f.host.adoptDraft({sessionId:'story',draftId:draft.id,expectedNarrative:ref,expectedDraftVersion:edit.version}),{code:'OWNER_OPERATION_UNAVAILABLE'});
+  assert.equal((await f.host.narratives({sessionId:'story'})).records[0].text,'Accepted prose.');
   await assert.rejects(f.host.createDraft({sessionId:'denied',basedOn:{...ref,sessionId:'denied'}}),{code:'FORBIDDEN'});
   await assert.rejects(f.host.createDraft({sessionId:'story',basedOn:{...ref,resultSeq:999}}),{code:'NARRATIVE_CONFLICT'});
 });
@@ -323,10 +339,79 @@ test('manual-first candidates copy effective adopted prose or owner text without
 });
 
 test('GM story identity is frozen independently of optional Context for assembly and writer',async t=>{
-  const story={title:'The Gate',character:{name:'Mara',assetId:'actor',version:1},persona:{name:'Reader',description:'A careful visitor.'},examples:'Quiet speech.'};
+  const story={title:'The Gate',character:{name:'Mara',assetId:'actor',version:1,extensions:{private:'UNKNOWN_CARD_EXTENSION'}},persona:{name:'Reader',description:'A careful visitor.'},examples:'Quiet speech.',extensions:{script:'INERT_UNKNOWN_SOURCE'}};
   const f=await fixture(t,{services:{rpGM:{binding:async()=>({id:'gm'}),presentation:async()=>({factReceipt:{id:'fact',kind:'turn'},packet,story})}},stages:[request=>{const input=JSON.parse(request.messages[0].content[0].text);assert.equal(input.story.character.name,'Mara');story.character.name='Changed later';return{commit:true};},request=>{const input=JSON.parse(request.messages[0].content[0].text);assert.equal(input.story.character.name,'Mara');assert.equal(input.story.examples,'Quiet speech.');return'Frozen identity prose.';}]});
   await bind(f);const result=await f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'story-input',factReceiptId:'fact'});
   assert.equal(result.text,'Frozen identity prose.');
+  const material=await f.host.material({sessionId:'story',presentationId:result.id});assert.equal(material.storySnapshot.character.name,'Mara');assert.equal(material.storySnapshot.character.extensions,undefined);assert.equal(material.storySnapshot.extensions,undefined);
+  material.storySnapshot.character.name='Audit caller edit';assert.equal((await f.host.material({sessionId:'story',presentationId:result.id})).storySnapshot.character.name,'Mara');
+});
+
+test('real child ancestry inherits prefix-captured composition and permits only its active parent material',async t=>{
+  const f=await fixture(t);const profile=ready([entry('style','Base style.')]);await bind(f,profile);
+  await f.host.patch({sessionId:'story',expectedRevision:(await f.store.snapshot()).revision,operations:[{op:'replace',entryId:'style',content:'Prefix style.'}]});
+  const result=await f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',packet});await f.host.commit({sessionId:'story',presentationId:result.id,seq:5});
+  const parentEvents=acceptedEvents(result);f.agents.get('story').session.snapshotEvents=()=>parentEvents;
+  await f.host.patch({sessionId:'story',expectedRevision:(await f.store.snapshot()).revision,operations:[{op:'replace',entryId:'style',content:'Later parent style.'}]});
+  const child=f.makeAgent('child');child.session.header={id:'child',parentSession:'story',isSeeded:true};child.session.inheritedEventCount=parentEvents.length;child.session.snapshotEvents=()=>structuredClone(parentEvents);f.agents.set('child',child);
+  await f.host.inheritSession({parentSessionId:'story',sessionId:'child'});assert.equal((await f.store.binding('child')).overlay.entries.style.content,'Prefix style.');
+  const audit=await f.host.material({sessionId:'child',presentationId:result.id});assert.equal(audit.compiled.messages[0].content,'Prefix style.');
+  await f.host.patch({sessionId:'child',expectedRevision:(await f.store.snapshot()).revision,operations:[{op:'replace',entryId:'style',content:'Independent child.'}]});
+  await f.host.inheritSession({parentSessionId:'story',sessionId:'child'});assert.equal((await f.store.binding('child')).overlay.entries.style.content,'Independent child.');
+  const foreign=f.makeAgent('foreign-child');foreign.session.header={id:'foreign-child',parentSession:'code',isSeeded:true};foreign.session.inheritedEventCount=parentEvents.length;foreign.session.snapshotEvents=()=>structuredClone(parentEvents);f.agents.set('foreign-child',foreign);
+  await assert.rejects(f.host.inheritSession({parentSessionId:'story',sessionId:'foreign-child'}),{code:'SESSION_ANCESTRY_REQUIRED'});
+  await assert.rejects(f.host.material({sessionId:'foreign-child',presentationId:result.id}),{code:'RECEIPT_NOT_FOUND'});
+});
+
+test('durable content revision covers receipts and drafts while legacy edits retain their preset revision domain',async t=>{
+  const f=await fixture(t);await bind(f);const library=(await f.host.state('story')).revision,before=(await f.host.contentRevision()).revision;
+  const result=await f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',packet});const rendered=(await f.host.contentRevision()).revision;assert.ok(rendered>before);assert.equal((await f.host.state('story')).revision,library);
+  await f.host.commit({sessionId:'story',presentationId:result.id,seq:5});assert.ok((await f.host.contentRevision()).revision>rendered);f.agents.get('story').session.snapshotEvents=()=>acceptedEvents(result);
+  const ref=(await f.host.narratives({sessionId:'story'})).records[0].ref,draft=await f.host.createDraft({sessionId:'story',basedOn:ref,kind:'manual'}),generated=(await f.host.contentRevision()).revision;
+  await f.host.editDraft({sessionId:'story',draftId:draft.id,expectedDraftVersion:draft.version,text:'Owner edit.'});assert.ok((await f.host.contentRevision()).revision>generated);assert.equal((await f.host.state('story')).revision,library);
+  const content=await f.host.exportContent({profileId:'preset',version:1}),expectedRevision=(await f.host.contentRevision()).revision;
+  const imported=await f.host.importContent({...content,requestId:'aggregate-import',expectedRevision});assert.ok(imported.revision>expectedRevision);assert.equal((await f.host.state('story')).revision,library+1);
+  assert.deepEqual(await f.host.importContent({...content,requestId:'aggregate-import',expectedRevision}),imported);
+});
+
+test('state transfer preserves exact required profiles, receipts and drafts while retaining unrelated destination data',async t=>{
+  const source=await fixture(t);await bind(source,{...ready(),id:'__proto__'});
+  const result=await source.host.present({sessionId:'story',agent:source.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',packet});await source.host.commit({sessionId:'story',presentationId:result.id,seq:5});const events=acceptedEvents(result);source.agents.get('story').session.snapshotEvents=()=>events;
+  const ref=(await source.host.narratives({sessionId:'story'})).records[0].ref,draft=await source.host.createDraft({sessionId:'story',basedOn:ref,kind:'manual',text:'Saved private candidate.'});
+  await source.host.saveProfile({profile:{...ready(),id:'unrelated-source',name:'Do not export'},expectedRevision:(await source.store.snapshot()).revision});
+  const state=await source.host.exportState({sessionIds:['story']});assert.equal(state.schemaVersion,1);assert.equal(state.payload.profiles.some(profile=>profile.id==='unrelated-source'),false);assert.equal(state.payload.receipts.length,1);assert.equal(state.payload.drafts[draft.id][0].text,'Saved private candidate.');
+  const destination=await fixture(t);await destination.host.saveProfile({profile:{...ready(),id:'destination-keep',name:'Keep me'},expectedRevision:0});
+  const preview=await destination.host.preflightRestore({sessionIds:['story'],state});assert.equal(preview.supported,true);assert.equal((await destination.host.state('story')).profiles.length,1);
+  const cyclic=structuredClone(state);cyclic.payload.receipts[0].rewriteOf=cyclic.payload.receipts[0].id;const invalid=await destination.host.preflightRestore({sessionIds:['story'],state:cyclic});assert.equal(invalid.supported,false);assert.equal(invalid.conflicts[0].code,'RESTORE_PAYLOAD_INVALID');
+  const extensions=structuredClone(state);extensions.payload.receipts[0].storySnapshot={title:'The Gate',extensions:{script:'UNKNOWN_IMPORTED_EXTENSION'}};assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:extensions})).supported,false);
+  await assert.rejects(destination.host.restoreState({restoreId:'restore-one',sessionIds:['story'],state,expectedRevision:(await destination.host.contentRevision()).revision}),{code:'RESTORE_PAYLOAD_INVALID'});assert.equal((await destination.host.state('story')).profiles.length,1);
+  destination.agents.get('story').session.snapshotEvents=()=>events;
+  await assert.rejects(destination.host.restoreState({restoreId:'missing-revision',sessionIds:['story'],state}),{code:'EXPECTED_REVISION_REQUIRED'});assert.equal((await destination.host.state('story')).profiles.length,1);
+  const expectedRevision=(await destination.host.contentRevision()).revision,restored=await destination.host.restoreState({restoreId:'restore-one',sessionIds:['story'],state,expectedRevision});assert.deepEqual(restored.restoredSessionIds,['story']);
+  assert.equal((await destination.host.material({sessionId:'story',presentationId:result.id})).packet.playerAction,packet.playerAction);assert.equal((await destination.host.drafts({sessionId:'story'})).drafts[0].text,'Saved private candidate.');assert.ok(await destination.store.profile('destination-keep',1));assert.ok(await destination.store.binding('story'));
+  assert.deepEqual(await destination.host.restoreState({restoreId:'restore-one',sessionIds:['story'],state,expectedRevision}),restored);
+  const beforeLookup=destination.remoteCalls.length;await assert.rejects(destination.host.restoreState({restoreId:'restore-one',sessionIds:['story'],state:{schemaVersion:'bad',revision:0,payload:{}},expectedRevision:restored.revision}),{code:'RESTORE_PAYLOAD_INVALID'});assert.equal(destination.remoteCalls.length,beforeLookup);
+  await assert.rejects(destination.host.restoreState({restoreId:'restore-one',sessionIds:['story','other'],state,expectedRevision:restored.revision}),{code:'RESTORE_ID_CONFLICT'});
+  const changed=structuredClone(state);changed.payload.receipts[0].text='Forged accepted body.';await assert.rejects(destination.host.restoreState({restoreId:'restore-one',sessionIds:['story'],state:changed,expectedRevision:restored.revision}),{code:'RESTORE_ID_CONFLICT'});
+  assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:changed})).supported,false);assert.equal((await destination.host.contentRevision()).revision,restored.revision);
+});
+
+test('export drains an in-flight candidate and rejects new owner work while capturing stable state',async t=>{
+  let release,entered;const hold=new Promise(done=>{release=done}),started=new Promise(done=>{entered=done});
+  const f=await fixture(t,{stages:[{commit:true},'Accepted prose.',async()=>{entered();await hold;return'Finished candidate.'}]});await bind(f);const result=await f.host.present({sessionId:'story',agent:f.agents.get('story'),contextKey:'["story","assistant-1","call-1"]',packet});await f.host.commit({sessionId:'story',presentationId:result.id,seq:5});f.agents.get('story').session.snapshotEvents=()=>acceptedEvents(result);
+  const ref=(await f.host.narratives({sessionId:'story'})).records[0].ref,pending=f.host.createDraft({sessionId:'story',basedOn:ref});await started;let exported=false;
+  const capture=f.host.exportState({sessionIds:['story']}).then(value=>{exported=true;return value;});await new Promise(done=>setTimeout(done,5));
+  const gate=[...f.ctx.listeners.get('agent/pre-step')][0],normal=async()=>({kind:'enter',messages:[]});assert.equal((await gate({agent:f.agents.get('code'),turn:1},normal)).kind,'enter');assert.equal((await gate({agent:f.agents.get('story'),turn:2},normal)).kind,'reject');
+  await assert.rejects(f.host.createDraft({sessionId:'story',basedOn:ref,kind:'manual'}),{code:'OWNER_STATE_BUSY'});assert.equal(exported,false);release();const draft=await pending,state=await capture;assert.equal(state.payload.drafts[draft.id].at(-1).status,'ready');assert.equal(state.payload.drafts[draft.id].at(-1).text,'Finished candidate.');
+});
+
+test('state capture drains asynchronous canonical-result bookkeeping and its outcome callbacks',async t=>{
+  let release,entered;const hold=new Promise(done=>{release=done}),started=new Promise(done=>{entered=done});
+  const f=await fixture(t,{services:{rpContext:{prepare:async()=>({id:'material',materials:{entries:[],history:[],recentProse:[]}}),presentationOutcome:async input=>{if(input.status==='accepted'){entered();await hold;}}}}});await bind(f);
+  const result=await f.ctxTools.get('rp_present').execute({packet},{agent:f.agents.get('story'),callId:'call-1',rootCallId:'call-1',signal:new AbortController().signal,concludeTurn(){}}),events=acceptedEvents(result);f.agents.get('story').session.snapshotEvents=()=>events;
+  f.ctx.emit('session/event',f.agents.get('story').session,events[4]);f.ctx.emit('session/event',f.agents.get('story').session,events[5]);await started;
+  let exported=false;const capture=f.host.exportState({sessionIds:['story']}).then(value=>{exported=true;return value;});await new Promise(done=>setTimeout(done,20));const early=exported;
+  release();await capture;await f.ctx.flush();assert.equal(early,false);
 });
 
 test('plugin apply provides its service and routes while returning a valid Cordis effect result', async (t) => {

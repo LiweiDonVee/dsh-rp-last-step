@@ -41,7 +41,8 @@
     "test:ui": "vitest run",
     "check": "pnpm lint && pnpm test && pnpm build",
     "package": "pnpm build && node scripts/pack.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:drafts": "node scripts/drafts-smoke.mjs"
   },
   "peerDependencies": {
     "react": "^18.3.1"

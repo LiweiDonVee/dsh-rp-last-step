@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { retryEligibility } from './retry.mjs';
 import { PresetError, applyAgentOperations, compileProfile, emptyOverlay, validateProfile } from './core.mjs';
 import { resolveModelConfig } from './models.mjs';
-import { publicReceipt } from './receipts.mjs';
+import { publicReceipt,publicStorySnapshot } from './receipts.mjs';
 
 const has = (value, key) => Object.hasOwn(value, key);
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -383,7 +383,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
       nonempty(sessionId, 'Session id');
       nonempty(contextKey, 'Context key');
       const packet = normalizeDirectionPacket(input);
-      const storySnapshot=story===undefined?undefined:snapshot(story);
+      const storySnapshot=story===undefined?undefined:snapshot(publicStorySnapshot(story));
       if (!Array.isArray(recentProse) || recentProse.some((value) => typeof value !== 'string')) fail('INVALID_PUBLIC_PROSE', 'Recent prose must be explicitly public strings');
       let prose = snapshot(recentProse);
       const key = JSON.stringify([sessionId, contextKey]);
