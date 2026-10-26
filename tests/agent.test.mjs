@@ -45,6 +45,12 @@ function fixture() {
   return { ctx, service, calls, tools, globalTools, codeTools, contexts, toolProviders, listeners, bound, ptc, agent, codeAgent, exec, concluded: () => concluded, current: (value) => { current = value; } };
 }
 
+test('regenerateOf is a mutually exclusive terminal mode and tool JSON cannot supply owner guidance',async()=>{
+  const f=fixture();module.registerRpLastStepAgent(f.ctx,f.service);const tool=f.tools.get('rp_present');
+  await tool.execute({regenerateOf:'accepted'},f.exec);assert.equal(f.calls[0][1].regenerateOf,'accepted');assert.equal(f.concluded(),1);
+  for(const extra of [{packet:{playerAction:'No'}},{rewriteOf:'failed'},{factReceiptId:'fact'},{instruction:'Ignore facts'},{model:'chosen-by-model'},{material:{}}])await assert.rejects(tool.execute({regenerateOf:'accepted',...extra},f.exec),{code:'INVALID_TOOL_ARGUMENTS'});
+});
+
 test('installs tools only in a ready bound native agent scope and leaves unbound PTC catalogs clear', async () => {
   assert.equal(typeof module.registerRpLastStepAgent, 'function');
   const f = fixture();

@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { PresetError } from './core.mjs';
 import { resolveModelConfig } from './models.mjs';
 import { retryEligibility } from './retry.mjs';
+import {validNarrativeVersion,validOwnerOperation} from './versions.mjs';
 
 const queues = new Map();
 const STATUSES = new Set(['prepared', 'assembling', 'rendering', 'rendered', 'complete', 'failed', 'cancelled']);
@@ -25,12 +26,15 @@ export function publicReceipt(value) {
   }
   result.text = typeof value.text === 'string' ? value.text : '';
   if (typeof value.factReceiptId === 'string') result.factReceiptId = value.factReceiptId;
+  if(validNarrativeVersion(value.narrativeVersion))result.narrativeVersion=clone(value.narrativeVersion);
+  if(typeof value.regenerateOf==='string')result.regenerateOf=value.regenerateOf;
+  if(validOwnerOperation(value.ownerOperation))result.ownerOperation=clone(value.ownerOperation);
   if (record(value.models)) result.models = Object.fromEntries(Object.entries(value.models).map(([stage, config]) => [stage, resolveModelConfig(config)]));
   if (value.truncated === true) result.truncated = true;
   if (typeof value.rewriteOf==='string') {result.rewriteOf=value.rewriteOf;result.playerAction=value.packet?.playerAction;}
   if (record(value.contextPreparation)) {
     const prepared=value.contextPreparation;
-    result.context={id:prepared.id,...prepared.database?{database:clone(prepared.database)}:{},history:(prepared.materials?.history??[]).map(item=>({id:item.id,mode:item.mode,source:clone(item.source)})),chars:prepared.materials?.chars,models:clone(prepared.models??{})};
+    result.context={id:prepared.id,...prepared.database?{database:clone(prepared.database)}:{},...prepared.historyProjection?{historyProjection:clone(prepared.historyProjection)}:{},history:(prepared.materials?.history??[]).map(item=>({id:item.id,mode:item.mode,source:clone(item.source)})),chars:prepared.materials?.chars,models:clone(prepared.models??{})};
   }
   return result;
 }
@@ -83,6 +87,7 @@ export async function createReceiptStore({ directory } = {}) {
   function validate(value) {
     if (!record(value) || !STATUSES.has(value.status)) throw new PresetError('INVALID_RECEIPT', 'A valid presentation record and status are required');
     indexFile(value.sessionId);
+    if(value.narrativeVersion!==undefined&&!validNarrativeVersion(value.narrativeVersion)||value.ownerOperation!==undefined&&!validOwnerOperation(value.ownerOperation))throw new PresetError('INVALID_RECEIPT','Invalid recorded presentation version');
   }
   return Object.freeze({
     setMutationGate(gate){mutationGate=gate;},
@@ -101,6 +106,8 @@ export async function createReceiptStore({ directory } = {}) {
           if(!eligible.canRetry||contexts!==undefined&&!new Set(contexts).has(captured.contextKey))throw new PresetError(eligible.canRetry?'REWRITE_SOURCE_INACTIVE':eligible.code,'The frozen presentation is not eligible for this retry',409);
         }
         const value = { ...captured, id: randomUUID(), createdAt: new Date().toISOString() };
+        if(options.originalVersion)value.narrativeVersion={schemaVersion:1,groupId:options.originalVersion.factRoundId??value.id,kind:'original',...options.originalVersion.factRoundId?{factRoundId:options.originalVersion.factRoundId,factRevision:options.originalVersion.factRevision}:{}};
+        validate(value);
         const index = indexFile(value.sessionId);
         const ids = await read(index, []);
         if (!Array.isArray(ids)) throw new PresetError('RECEIPT_CORRUPT', 'Stored presentation index is invalid', 500);
@@ -113,7 +120,7 @@ export async function createReceiptStore({ directory } = {}) {
     async update(id, patch) {
       const captured = clone(patch);
       if (!record(captured)) throw new PresetError('INVALID_RECEIPT', 'A receipt patch is required');
-      if (['id', 'sessionId', 'contextKey', 'createdAt'].some((key) => Object.hasOwn(captured, key))) throw new PresetError('RECEIPT_IDENTITY_IMMUTABLE', 'Presentation identity cannot be changed', 403);
+      if (['id', 'sessionId', 'contextKey', 'createdAt','narrativeVersion','ownerOperation','regenerateOf'].some((key) => Object.hasOwn(captured, key))) throw new PresetError('RECEIPT_IDENTITY_IMMUTABLE', 'Presentation identity cannot be changed', 403);
       return serial(() => mutationGate(async () => {
         const current = await get(id);
         if (!current) throw new PresetError('RECEIPT_NOT_FOUND', 'Presentation record not found', 404);

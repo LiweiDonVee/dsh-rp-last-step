@@ -26,11 +26,11 @@ flowchart TD
 
 0.3 需要 **DSH 0.2.1-rc.3** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
 
-1. 从 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases/latest) 下载 `dsh-rp-last-step-0.3.0.tgz`。
+1. 从 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases/latest) 下载所需版本安装包；本源码构建为 `dsh-rp-last-step-0.4.0.tgz`。
 2. 完全退出 DSH，包括后台进程。在文件所在目录执行：
 
 ```powershell
-dsh plugin --profile desktop add ./dsh-rp-last-step-0.3.0.tgz
+dsh plugin --profile desktop add ./dsh-rp-last-step-0.4.0.tgz
 ```
 
 3. 重启 DSH，点击会话顶部的 **预设**，或从右侧新增页签导航打开 **RP 最后一步**。
@@ -39,10 +39,10 @@ Web 模式将 `desktop` 改为 `web`。不需要另开服务、安装 Node/pnpm 
 
 ```powershell
 $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'
-& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.3.0.tgz
+& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.4.0.tgz
 ```
 
-自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。发布页附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.3.0.tgz -Algorithm SHA256` 核对。
+自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。安装包附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.4.0.tgz -Algorithm SHA256` 核对。
 
 ## 从导入到第一轮正文
 
@@ -97,6 +97,10 @@ $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runti
 采用通过真实原生维护回合只替换正文 content，保留原事实与工具来源，且不调用模型。当前 rc.3 将维护回合结束原因记为 **blocked**；操作成功另有确认，这不表示剧情行动失败，也不会伪造为 completed。
 
 失败记录中的 **仅重试正文** 复用原冻结输入。原生按钮可包含一次受限主模型派发和一次 writer 调用；执行器只允许所选失败 ID 的 `rp_present({rewriteOf})`，不能改为新 packet、事实回执或事实工具。材料检查读取当时保存的候选池、实际选材、模块和模型，不从当前数据库重建，也不展示隐藏推理。
+
+**只重新写作** 是独立动作：复用当前事实版本的完整冻结材料，按当前 render 路由调用 writer，追加新的规范正文。不会再次提交事实、选材、摘要或组装；同事实下失败或取消时保留原有效正文。旧正文保留在折叠审计里，手改与候选仍使用各自的显式采用流程。
+
+`rpLastStep.storyHistory({sessionId})` 返回 Database 当前事实版本对应的有效正文和折叠版本清单。新事实生效但正文尚未成功时，该版本没有有效正文。`narratives()` 继续返回规范接受审计，供作者注等来源证明使用。新事实版本依赖 Database `factReview=1`；缺失时明确报 `EFFECTIVE_HISTORY_UNAVAILABLE`。旧纯 packet 故事继续独立运行；旧事实回执的写作重生需 GM `storyState().lastFactReceipt.id` 确认当前回执。
 
 ![正文候选与比较](docs/images/drafts.png)
 

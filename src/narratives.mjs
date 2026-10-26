@@ -1,5 +1,6 @@
 import {isDeepStrictEqual} from 'node:util';
 import {PresetError} from './core.mjs';
+import {validNarrativeVersion} from './versions.mjs';
 
 const refFields=['sessionId','presentationId','assistantMessageId','callSeq','baseResultSeq','resultSeq'];
 const textOf=message=>(message?.content??[]).filter(block=>block.type==='text'&&typeof block.text==='string').map(block=>block.text).join('\n');
@@ -34,7 +35,7 @@ export function readNarratives(sessionId,input){
     if(!event||seen.has(event.seq)||event.type!=='tool/result')return null;
     seen.add(event.seq);
     const data=event.data,message=data?.message,envelope=data?.meta?.rpLastStep,record=envelope?.record;
-    if(message?.role!=='tool'||message.source?.kind!=='tool'||message.isError===true||message.toolCallId!==message.source.callId||envelope?.schemaVersion!==1||record?.status!=='complete'||typeof record.id!=='string'||!textOf(message).trim())return null;
+    if(message?.role!=='tool'||message.source?.kind!=='tool'||message.isError===true||message.toolCallId!==message.source.callId||envelope?.schemaVersion!==1||record?.status!=='complete'||typeof record.id!=='string'||!textOf(message).trim()||record.narrativeVersion!==undefined&&!validNarrativeVersion(record.narrativeVersion))return null;
     const sources=event.sourceEventSeqs;
     if(!Array.isArray(sources)||new Set(sources).size!==sources.length||sources.some(seq=>!Number.isSafeInteger(seq)||seq>=event.seq))return null;
     let result;
@@ -58,7 +59,7 @@ export function readNarratives(sessionId,input){
     const source=resolve(event);if(!source)continue;
     const {base,call,assistant}=source,record=base.data.meta.rpLastStep.record;
     const user=events.findLast(candidate=>candidate.seq<assistant.seq&&active.has(candidate.seq)&&candidate.type==='user/message'&&candidate.data?.source?.kind==='user');
-    records.push({id:JSON.stringify([record.id,event.seq]),ref:{sessionId,presentationId:record.id,assistantMessageId:assistant.data.message.id,callSeq:call.seq,baseResultSeq:base.seq,resultSeq:event.seq},turn:base.data.turn,action:record.playerAction??textOf(user?.data),text:textOf(event.data.message),...(typeof record.factReceiptId==='string'?{factReceiptId:record.factReceiptId}:{}),...(typeof record.createdAt==='string'?{createdAt:record.createdAt}:{})});
+    records.push({id:JSON.stringify([record.id,event.seq]),ref:{sessionId,presentationId:record.id,assistantMessageId:assistant.data.message.id,callSeq:call.seq,baseResultSeq:base.seq,resultSeq:event.seq},turn:base.data.turn,action:record.playerAction??textOf(user?.data),text:textOf(event.data.message),...(typeof record.factReceiptId==='string'?{factReceiptId:record.factReceiptId}:{}),...(typeof record.createdAt==='string'?{createdAt:record.createdAt}:{}),...record.narrativeVersion?{narrativeVersion:structuredClone(record.narrativeVersion)}:{}});
   }
   return records.sort((a,b)=>a.ref.callSeq-b.ref.callSeq);
 }
