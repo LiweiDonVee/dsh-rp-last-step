@@ -319,6 +319,30 @@ test('transfer rejects a player action that differs from frozen input or actual 
   await assert.rejects(destination.host.restoreState({sessionIds:['story'],state,restoreId:'wrong-canonical-action',expectedRevision:(await destination.host.contentRevision()).revision}),{code:'RESTORE_PAYLOAD_INVALID'});
 });
 
+test('restore rejects omitted protected public revision metadata before intact zero-model replay',async t=>{
+  const source=await revisionFixture(t);source.agent.session.append('user/message',{id:'player-action',role:'user',source:{kind:'user'},content:[{type:'text',text:'Try the gate'}]},{surfaceOp:'append'});
+  await source.canonical({factReceiptId:'fact-1'});const basedOn=(await source.host.narratives({sessionId:'story'})).records[0].ref,request={sessionId:'story',basedOn,operationId:'omission-transfer-proof'},result=await source.host.regenerateProse(request),state=await source.host.exportState({sessionIds:['story']}),destination=await revisionFixture(t);
+  destination.events.push(...structuredClone(source.events));const revision=(await destination.host.contentRevision()).revision,events=structuredClone(destination.events);
+  for(const field of ['playerAction','factReceiptId','regenerateOf','narrativeVersion','ownerOperation']){
+    const omitted=structuredClone(state),receipt=omitted.payload.receipts.find(item=>item.id===result.presentationId);assert.equal(Object.hasOwn(receipt,field),true);delete receipt[field];
+    await assert.rejects(destination.host.restoreState({sessionIds:['story'],state:omitted,restoreId:'missing-'+field,expectedRevision:revision}),{code:'RESTORE_PAYLOAD_INVALID'},field);
+    assert.equal((await destination.host.contentRevision()).revision,revision);assert.equal(destination.calls.length,0);assert.deepEqual(destination.events,events);
+  }
+  await destination.host.restoreState({sessionIds:['story'],state,restoreId:'intact-after-omissions',expectedRevision:revision});assert.deepEqual(await destination.host.regenerateProse(request),result);assert.equal(destination.calls.length,0);
+  assert.equal((await destination.host.storyHistory({sessionId:'story'})).records.at(-1).action,'Try the gate');assert.equal((await destination.host.exportState({sessionIds:['story']})).payload.receipts.find(item=>item.id===result.presentationId).playerAction,'Try the gate');
+});
+
+test('legacy rewrite transfer preserves its packet-derived public action without a stored action field',async t=>{
+  const source=await revisionFixture(t,{legacy:true,stages:[{commit:true},new Error('legacy writer failed'),'Legacy retry prose.']});await assert.rejects(source.canonical({packet}));
+  const failed=(await source.host.presentationSummaries({sessionId:'story'})).presentations[0];assert.equal((await source.host.retryPresentation({sessionId:'story',presentationId:failed.presentationId})).result.kind,'success');
+  const state=await source.host.exportState({sessionIds:['story']}),saved=state.payload.receipts.find(item=>item.rewriteOf===failed.presentationId),canonical=source.events.find(event=>event.data?.meta?.rpLastStep?.record.id===saved.id).data.meta.rpLastStep.record;
+  assert.equal(Object.hasOwn(saved,'playerAction'),false);assert.equal(canonical.playerAction,'Try the gate');const destination=await revisionFixture(t,{legacy:true});destination.events.push(...structuredClone(source.events));
+  const revision=(await destination.host.contentRevision()).revision,omitted=structuredClone(state);delete omitted.payload.receipts.find(item=>item.id===saved.id).rewriteOf;
+  await assert.rejects(destination.host.restoreState({sessionIds:['story'],state:omitted,restoreId:'missing-legacy-rewrite',expectedRevision:revision}),{code:'RESTORE_PAYLOAD_INVALID'});
+  await destination.host.restoreState({sessionIds:['story'],state,restoreId:'intact-legacy-rewrite',expectedRevision:revision});assert.equal(destination.calls.length,0);assert.equal((await destination.host.narratives({sessionId:'story'})).records[0].action,'Try the gate');
+  assert.equal(Object.hasOwn((await destination.host.exportState({sessionIds:['story']})).payload.receipts.find(item=>item.id===saved.id),'playerAction'),false);
+});
+
 function acceptedEvents(result){
   const events=baseEvents();
   events[3].data.message.id='assistant-1';events[3].data.message.content[0]={type:'tool-call',id:'call-1',name:'rp_present',arguments:JSON.stringify({factReceiptId:result.factReceiptId})};
