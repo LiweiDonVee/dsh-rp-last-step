@@ -25,6 +25,7 @@ export function publicReceipt(value) {
     if (value[key] !== undefined) result[key] = clone(value[key]);
   }
   result.text = typeof value.text === 'string' ? value.text : '';
+  if(typeof value.playerAction==='string')result.playerAction=value.playerAction;
   if (typeof value.factReceiptId === 'string') result.factReceiptId = value.factReceiptId;
   if(validNarrativeVersion(value.narrativeVersion))result.narrativeVersion=clone(value.narrativeVersion);
   if(typeof value.regenerateOf==='string')result.regenerateOf=value.regenerateOf;
@@ -88,6 +89,7 @@ export async function createReceiptStore({ directory } = {}) {
     if (!record(value) || !STATUSES.has(value.status)) throw new PresetError('INVALID_RECEIPT', 'A valid presentation record and status are required');
     indexFile(value.sessionId);
     if(value.narrativeVersion!==undefined&&!validNarrativeVersion(value.narrativeVersion)||value.ownerOperation!==undefined&&!validOwnerOperation(value.ownerOperation))throw new PresetError('INVALID_RECEIPT','Invalid recorded presentation version');
+    if(value.playerAction!==undefined&&(typeof value.playerAction!=='string'||value.playerAction!==value.packet?.playerAction))throw new PresetError('INVALID_RECEIPT','The recorded player action must match the frozen packet');
   }
   return Object.freeze({
     setMutationGate(gate){mutationGate=gate;},
@@ -120,7 +122,7 @@ export async function createReceiptStore({ directory } = {}) {
     async update(id, patch) {
       const captured = clone(patch);
       if (!record(captured)) throw new PresetError('INVALID_RECEIPT', 'A receipt patch is required');
-      if (['id', 'sessionId', 'contextKey', 'createdAt','narrativeVersion','ownerOperation','regenerateOf'].some((key) => Object.hasOwn(captured, key))) throw new PresetError('RECEIPT_IDENTITY_IMMUTABLE', 'Presentation identity cannot be changed', 403);
+      if (['id', 'sessionId', 'contextKey', 'createdAt','narrativeVersion','ownerOperation','regenerateOf','playerAction'].some((key) => Object.hasOwn(captured, key))) throw new PresetError('RECEIPT_IDENTITY_IMMUTABLE', 'Presentation identity cannot be changed', 403);
       return serial(() => mutationGate(async () => {
         const current = await get(id);
         if (!current) throw new PresetError('RECEIPT_NOT_FOUND', 'Presentation record not found', 404);

@@ -378,7 +378,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
         const models={render:resolveModelConfig(base,route.render??{})};
         const composition=snapshot({packet:original.packet,profile:original.profile,overlay:original.overlay,compiled:original.compiled,recentProse:original.recentProse??[],contextPreparation:original.contextPreparation,...original.storySnapshot?{storySnapshot:original.storySnapshot}:{},models,instruction});
         const prior=original.narrativeVersion,narrativeVersion={schemaVersion:1,groupId:prior?.groupId??original.id,kind:'writer-regeneration',basePresentationId:original.id,...prior?.factRoundId?{factRoundId:prior.factRoundId,factRevision:prior.factRevision}:{}};
-        receipt=await receipts.create({...composition,sessionId,contextKey,status:'prepared',stageId:STAGES.render,text:'',regenerateOf:original.id,narrativeVersion,...original.factReceiptId?{factReceiptId:original.factReceiptId}:{},...ownerOperation?{ownerOperation}:{},profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash});
+        receipt=await receipts.create({...composition,sessionId,contextKey,status:'prepared',stageId:STAGES.render,text:'',playerAction:original.packet.playerAction,regenerateOf:original.id,narrativeVersion,...original.factReceiptId?{factReceiptId:original.factReceiptId}:{},...ownerOperation?{ownerOperation}:{},profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash});
         await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'prepared',models});
         return publicReceipt(await renderFrozen(receipt,composition,sessionId,signal));
       }catch(error){if(receipt)await markFailed(receipt,error,sessionId);if(signal?.aborted)signal.throwIfAborted();if(error instanceof PresetError||error?.name==='AbortError')throw error;fail('PRESENTATION_FAILED','The writer regeneration failed',502);}
@@ -427,7 +427,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
           sessionId, contextKey, status: 'prepared', stageId: STAGES.assemble, text: '',
           packet, recentProse: prose, profile: binding.profile, overlay: binding.overlay,
           revision: initial.revision, profileId: binding.profileId, profileVersion: binding.version,
-          profileHash: hash(binding.profile), models,contextPreparation:null,...(factReceiptId?{factReceiptId}:{}),...(storySnapshot?{storySnapshot}:{}),...ownerOperation?{ownerOperation}:{},
+          profileHash: hash(binding.profile), models,contextPreparation:null,...(factReceiptId?{factReceiptId}:{}),...(storySnapshot?{storySnapshot}:{}),...ownerOperation?{ownerOperation,playerAction:packet.playerAction}:{},
         },{originalVersion:{factRoundId,factRevision}});
         await emit({ sessionId, presentationId: receipt.id, stageId: STAGES.assemble, status: 'prepared', models });
         if(openingText!==undefined){

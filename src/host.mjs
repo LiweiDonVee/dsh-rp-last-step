@@ -287,7 +287,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     notify(event.sessionId, { ...event, type: 'stage' });
   }
   const makePresenter = () => createPresenter({ store, receipts, callModel, resolveModels, publish, skillText: skill.content, skillReference,
-    validateRetry:({sessionId,receipt,signal})=>assertFactCurrent(sessionId,receipt,ctx.agents.get(sessionId),signal),
+    validateRetry:({sessionId,receipt,signal})=>assertRetryFactCurrent(sessionId,receipt,ctx.agents.get(sessionId),signal),
     activeContexts:({sessionId})=>{
       const session=ctx.agents.get(sessionId)?.session;
       return session?.snapshotEvents?activePresentationContexts(sessionId,session.snapshotEvents()):[];
@@ -340,6 +340,13 @@ export async function createRpLastStepHost(ctx, options = {}) {
     if(!state?.lastFactReceipt?.id)throw new PresetError('EFFECTIVE_HISTORY_UNAVAILABLE','The current GM fact receipt could not be confirmed',503);
     if(state.lastFactReceipt.id!==factId)throw new PresetError('FACT_VERSION_SUPERSEDED','This legacy fact receipt is no longer current',409);
   }
+  async function assertRetryFactCurrent(id,receipt,agent,signal){
+    try{await assertFactCurrent(id,receipt,agent,signal,{latest:true});}
+    catch(error){
+      if(error.code==='FACT_ROUND_NOT_LATEST')throw new PresetError('FACT_VERSION_SUPERSEDED','Later facts supersede this failed presentation',409);
+      throw error;
+    }
+  }
   const ordered=value=>Array.isArray(value)?value.map(ordered):object(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,ordered(value[key])])):value;
   function ownerRequest(kind,input){
     if(typeof input.sessionId!=='string'||!input.sessionId.trim()||typeof input.operationId!=='string'||!input.operationId.trim()||/\s/u.test(input.operationId)||input.operationId.length>256)throw new PresetError('INVALID_REQUEST','Story and single-token operation IDs are required');
@@ -378,7 +385,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
   }
   async function retrySource(id,presentationId,agent=ctx.agents.get(id),signal){
     const records=await receipts.list(id),original=records.find(record=>record.id===presentationId),contexts=activePresentationContexts(id,agent?.session.snapshotEvents?.()??[]),eligible=retryEligibility(records,original,contexts);
-    if(original)await assertFactCurrent(id,original,agent,signal);
+    if(original)await assertRetryFactCurrent(id,original,agent,signal);
     if(!eligible.canRetry)throw new PresetError(eligible.code,'This frozen presentation is no longer eligible for retry',409);
     return original;
   }
@@ -545,7 +552,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     regenerateProse(input,signal=input.signal){return ownerPresentation('regenerateProse',input,signal);},
     presentationSummaries(input,signal=input.signal){return run(signal,async combined=>{
       await readSession(input.sessionId,combined);const records=await receipts.list(input.sessionId),agent=ctx.agents.get(input.sessionId),contexts=activePresentationContexts(input.sessionId,agent?.session.snapshotEvents?.()??[]);
-      const presentations=await Promise.all(records.map(async record=>{let eligible=retryEligibility(records,record,contexts);if(['failed','cancelled'].includes(record.status))try{await assertFactCurrent(input.sessionId,record,agent,combined);}catch(error){eligible={canRetry:false,code:error.code??'EFFECTIVE_HISTORY_UNAVAILABLE'};}return{presentationId:record.id,status:record.status,createdAt:record.createdAt,canRetry:eligible.canRetry,...eligible.canRetry?{}:{retryBlockCode:eligible.code},...typeof record.errorCode==='string'&&/^[A-Z][A-Z0-9_]{0,79}$/u.test(record.errorCode)?{errorCode:record.errorCode}:{},...typeof record.factReceiptId==='string'?{factReceiptId:record.factReceiptId}:{},...typeof record.rewriteOf==='string'?{rewriteOf:record.rewriteOf}:{},...record.narrativeVersion?{narrativeVersion:copy(record.narrativeVersion)}:{}};}));
+      const presentations=await Promise.all(records.map(async record=>{let eligible=retryEligibility(records,record,contexts);if(['failed','cancelled'].includes(record.status))try{await assertRetryFactCurrent(input.sessionId,record,agent,combined);}catch(error){eligible={canRetry:false,code:error.code??'EFFECTIVE_HISTORY_UNAVAILABLE'};}return{presentationId:record.id,status:record.status,createdAt:record.createdAt,canRetry:eligible.canRetry,...eligible.canRetry?{}:{retryBlockCode:eligible.code},...typeof record.errorCode==='string'&&/^[A-Z][A-Z0-9_]{0,79}$/u.test(record.errorCode)?{errorCode:record.errorCode}:{},...typeof record.factReceiptId==='string'?{factReceiptId:record.factReceiptId}:{},...typeof record.rewriteOf==='string'?{rewriteOf:record.rewriteOf}:{},...record.narrativeVersion?{narrativeVersion:copy(record.narrativeVersion)}:{}};}));
       let canRegenerate=false,regenerateBlockCode;
       try{const history=await effectiveHistory(input.sessionId,agent,combined),latest=history.records.at(-1);if(latest){await revisionPreparation('regenerateProse',{basedOn:latest.ref},agent,combined);canRegenerate=true;}}catch(error){regenerateBlockCode=error.code??'EFFECTIVE_HISTORY_UNAVAILABLE';}
       return{presentations,canRegenerate,...regenerateBlockCode?{regenerateBlockCode}:{},capabilities:{narrativeRevisions:1,regenerateDispatch:service.isEnabled(input.sessionId)&&ownerOperations.capable(agent,'regenerateProse'),retryDispatch:service.isEnabled(input.sessionId)&&ownerOperations.capable(agent,'retry')}};

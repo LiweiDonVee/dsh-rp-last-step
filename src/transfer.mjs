@@ -67,6 +67,7 @@ function validate(payload,raw,sessionIds){
   for(const receipt of payload.receipts){
     if(receipt.narrativeVersion!==undefined)requireValue(validNarrativeVersion(receipt.narrativeVersion));
     if(receipt.ownerOperation!==undefined)requireValue(validOwnerOperation(receipt.ownerOperation));
+    if(receipt.playerAction!==undefined)requireValue(typeof receipt.playerAction==='string'&&receipt.playerAction===receipt.packet.playerAction);
     if(receipt.instruction!==undefined)requireValue(typeof receipt.instruction==='string');
     if(receipt.regenerateOf!==undefined)requireValue(uuid.test(receipt.regenerateOf)&&receipt.narrativeVersion?.kind==='writer-regeneration'&&receipt.narrativeVersion.basePresentationId===receipt.regenerateOf);
     if(receipt.narrativeVersion?.factRoundId)requireValue(id(receipt.factReceiptId));
@@ -107,7 +108,7 @@ export function validateCanonicalState(payload,sessions){
     // A rendered receipt may legitimately lag canonical completion bookkeeping.
     if(accepted.length){
       requireValue(['rendered','complete'].includes(receipt.status));
-      requireValue(accepted.some(event=>{const record=event.data.meta.rpLastStep.record;return record.text===receipt.text&&record.factReceiptId===receipt.factReceiptId&&record.rewriteOf===receipt.rewriteOf&&record.regenerateOf===receipt.regenerateOf&&isDeepStrictEqual(record.narrativeVersion,receipt.narrativeVersion)&&isDeepStrictEqual(record.ownerOperation,receipt.ownerOperation);}));
+      requireValue(accepted.some(event=>{const record=event.data.meta.rpLastStep.record;return record.text===receipt.text&&record.factReceiptId===receipt.factReceiptId&&record.rewriteOf===receipt.rewriteOf&&record.regenerateOf===receipt.regenerateOf&&(receipt.playerAction===undefined||record.playerAction===receipt.playerAction)&&isDeepStrictEqual(record.narrativeVersion,receipt.narrativeVersion)&&isDeepStrictEqual(record.ownerOperation,receipt.ownerOperation);}));
     }else requireValue(receipt.status!=='complete');
   }
   for(const receipt of payload.receipts)if(receipt.narrativeVersion?.kind==='writer-regeneration')requireValue([...sessions.values()].some(snapshot=>readNarratives(snapshot.header.id,snapshot.events).some(record=>record.ref.presentationId===receipt.narrativeVersion.basePresentationId)));

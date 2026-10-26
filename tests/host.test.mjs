@@ -186,7 +186,7 @@ async function revisionFixture(t,{legacy=false,stages,projection:providedProject
     await f.ctx.flush();return result;
   }
   const next=async proposal=>{const handlers=[...f.ctx.listeners.get('agent/pre-step')??[]];const step=index=>handlers[index]?handlers[index](proposal,()=>step(index+1)):Promise.resolve({kind:'enter',messages:proposal.messages});return step(0);};
-  agent.followup=message=>{agent.status='running';work=Promise.resolve().then(async()=>{turn++;append('turn/start',{turn});const decision=await next({agent,turn,step:1,messages:[message],signal:new AbortController().signal});if(decision.kind==='enter'){counts.main++;const instruction=message.content[0].text;const args=dispatchArgs??JSON.parse(instruction.match(/rp_present\((\{.*\})\)/u)[1]);await canonical(args,turn).catch(()=>{});}append('turn/end',{turn,reason:{kind:'completed'}});await f.ctx.flush();}).finally(()=>{agent.status='idle';});};agent.whenIdle=()=>work;agent.cancel=()=>{};
+  agent.followup=message=>{agent.status='running';work=Promise.resolve().then(async()=>{turn++;append('turn/start',{turn});const decision=await next({agent,turn,step:1,messages:[message],signal:new AbortController().signal});if(decision.kind==='enter'){for(const admitted of decision.messages)append('user/message',admitted,{surfaceOp:'append'});counts.main++;const instruction=message.content[0].text;const args=dispatchArgs??JSON.parse(instruction.match(/rp_present\((\{.*\})\)/u)[1]);await canonical(args,turn).catch(()=>{});}append('turn/end',{turn,reason:{kind:'completed'}});await f.ctx.flush();}).finally(()=>{agent.status='idle';});};agent.whenIdle=()=>work;agent.cancel=()=>{};
   f.ctx.typertGateway.invoke=async request=>{const [,name,args]=/^\/([^ ]+)\s+(.*)$/u.exec(request.args.line),commandId='command-'+events.length;append('command/run',{commandId,name,args,source:{kind:'user'}});const result=await commands.get(name).handler({agent,rawInput:args,commandId,signal:request.signal});append('command/done',{commandId,result});return{commandId,result};};
   return{...f,agent,events,counts,guards,canonical:async args=>{turn++;append('turn/start',{turn});const result=await canonical(args,turn);append('turn/end',{turn,reason:{kind:'completed'}});await f.ctx.flush();return result;},setFact:(id,revision)=>{activeReceiptId=id;factRevision=revision;},pending:id=>{pendingCandidateId=id;},setDispatchArgs:value=>{dispatchArgs=value;},setAccept:value=>{accept=value;}};
 }
@@ -268,6 +268,55 @@ test('revision transfer validates optional metadata and canonical source agreeme
   assert.deepEqual(await destination.host.regenerateProse(request),result);assert.equal(destination.calls.length,0);
   const missing=await revisionFixture(t,{legacy:true});missing.events.push(...structuredClone(source.events));
   assert.equal((await missing.host.preflightRestore({sessionIds:['story'],state})).supported,false);
+});
+
+for(const later of ['captured','legacy'])test(`failed retry is superseded before dispatch after a later ${later} fact becomes current`,async t=>{
+  const projection={schemaVersion:1,latestRoundId:'round',groups:[{roundId:'round',source:{sessionId:'story'},activeReceiptId:'fact-1',factRevision:1,pendingCandidateId:null}]};
+  const f=await revisionFixture(t,{projection,stages:[{commit:true},new Error('writer failed'),'Late old-fact prose.']});
+  await assert.rejects(f.canonical({factReceiptId:'fact-1'}));const failed=(await f.host.presentationSummaries({sessionId:'story'})).presentations[0];assert.equal(failed.canRetry,true);
+  f.setFact('fact-2',1);projection.latestRoundId=later==='captured'?'round-2':null;
+  if(later==='captured')projection.groups.push({roundId:'round-2',source:{sessionId:'story'},activeReceiptId:'fact-2',factRevision:1,pendingCandidateId:null});
+  const summary=(await f.host.presentationSummaries({sessionId:'story'})).presentations.find(item=>item.presentationId===failed.presentationId),state=(await f.host.state('story')).presentations.find(item=>item.id===failed.presentationId),catalog=await f.host.catalog({sessionId:'story'}),eventsBefore=structuredClone(f.events),callsBefore=f.calls.length,mainBefore=f.counts.main;
+  let retryCode,directCode;
+  try{await f.host.retryPresentation({sessionId:'story',presentationId:failed.presentationId});}catch(error){retryCode=error.code;}
+  try{await f.host.present({sessionId:'story',agent:f.agent,contextKey:'stale-native-retry',rewriteOf:failed.presentationId});}catch(error){directCode=error.code;}
+  assert.deepEqual({canRetry:summary.canRetry,blockCode:summary.retryBlockCode,stateCanRetry:state.canRetry,stateBlockCode:state.retryBlockCode,catalogHasFailure:catalog.presentations.some(item=>item.id===failed.presentationId),retryCode,directCode,writerDelta:f.calls.length-callsBefore,mainDelta:f.counts.main-mainBefore},{canRetry:false,blockCode:'FACT_VERSION_SUPERSEDED',stateCanRetry:false,stateBlockCode:'FACT_VERSION_SUPERSEDED',catalogHasFailure:false,retryCode:'FACT_VERSION_SUPERSEDED',directCode:'FACT_VERSION_SUPERSEDED',writerDelta:0,mainDelta:0});
+  assert.deepEqual(f.events,eventsBefore);assert.deepEqual((await f.host.storyHistory({sessionId:'story'})).records,[]);
+});
+
+test('pure legacy packet failed retry remains independent of fact-round qualification',async t=>{
+  const f=await revisionFixture(t,{legacy:true,stages:[{commit:true},new Error('packet writer failed'),'Recovered packet prose.']});await assert.rejects(f.canonical({packet}));
+  const failed=(await f.host.presentationSummaries({sessionId:'story'})).presentations[0];assert.equal(failed.canRetry,true);
+  const result=await f.host.retryPresentation({sessionId:'story',presentationId:failed.presentationId});assert.equal(result.result.kind,'success');assert.equal(f.calls.length,3);assert.deepEqual(f.counts,{gm:0,prepare:1,main:1});
+});
+
+test('regeneration with a persisted owner followup preserves player action through canonical history, replay and transfer',async t=>{
+  const source=await revisionFixture(t);source.agent.session.append('user/message',{id:'player-action',role:'user',source:{kind:'user'},content:[{type:'text',text:'Try the gate'}]},{surfaceOp:'append'});
+  await source.canonical({factReceiptId:'fact-1'});const original=(await source.host.narratives({sessionId:'story'})).records[0];assert.equal(original.action,'Try the gate');
+  const request={sessionId:'story',basedOn:original.ref,operationId:'player-action-proof'},result=await source.host.regenerateProse(request);
+  assert.equal(result.status,'complete');assert.equal(source.events.some(event=>event.type==='user/message'&&event.data.source.kind==='user'&&event.data.content[0].text.includes('rp_present(')),true);
+  const canonical=(await source.host.narratives({sessionId:'story'})).records.at(-1),effective=(await source.host.storyHistory({sessionId:'story'})).records.at(-1),record=source.events.find(event=>event.data?.meta?.rpLastStep?.record.id===result.presentationId).data.meta.rpLastStep.record;
+  assert.deepEqual({canonicalAction:canonical.action,effectiveAction:effective.action,metadataAction:record.playerAction},{canonicalAction:'Try the gate',effectiveAction:'Try the gate',metadataAction:'Try the gate'});
+  const eventCount=source.events.length;assert.deepEqual(await source.host.regenerateProse(request),result);assert.equal(source.events.length,eventCount);
+  const state=await source.host.exportState({sessionIds:['story']}),saved=state.payload.receipts.find(item=>item.id===result.presentationId);assert.equal(saved.playerAction,'Try the gate');
+  const destination=await revisionFixture(t);destination.events.push(...structuredClone(source.events));await destination.host.restoreState({sessionIds:['story'],state,restoreId:'action-transfer',expectedRevision:(await destination.host.contentRevision()).revision});
+  assert.deepEqual(await destination.host.regenerateProse(request),result);assert.equal((await destination.host.storyHistory({sessionId:'story'})).records.at(-1).action,'Try the gate');assert.equal(destination.calls.length,0);
+});
+
+test('owner presentFact preserves frozen player action rather than its persisted management followup',async t=>{
+  const f=await revisionFixture(t),request={sessionId:'story',factReceiptId:'fact-1',operationId:'owner-present-action'},result=await f.host.presentFact(request);assert.equal(result.status,'complete');
+  const canonical=(await f.host.narratives({sessionId:'story'})).records[0],effective=(await f.host.storyHistory({sessionId:'story'})).records[0],record=f.events.find(event=>event.data?.meta?.rpLastStep?.record.id===result.presentationId).data.meta.rpLastStep.record;
+  assert.deepEqual({canonicalAction:canonical.action,effectiveAction:effective.action,metadataAction:record.playerAction},{canonicalAction:'Try the gate',effectiveAction:'Try the gate',metadataAction:'Try the gate'});
+  const count=f.events.length;assert.deepEqual(await f.host.presentFact(request),result);assert.equal(f.events.length,count);
+});
+
+test('transfer rejects a player action that differs from frozen input or actual canonical metadata',async t=>{
+  const source=await revisionFixture(t),result=await source.host.presentFact({sessionId:'story',factReceiptId:'fact-1',operationId:'action-transfer-proof'}),state=await source.host.exportState({sessionIds:['story']}),destination=await revisionFixture(t);
+  destination.events.push(...structuredClone(source.events));
+  const badAction=structuredClone(state);badAction.payload.receipts.find(item=>item.id===result.presentationId).playerAction='Owner management text';
+  assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:badAction})).supported,false);
+  const event=destination.events.find(item=>item.data?.meta?.rpLastStep?.record.id===result.presentationId);event.data.meta.rpLastStep.record.playerAction='Owner management text';
+  await assert.rejects(destination.host.restoreState({sessionIds:['story'],state,restoreId:'wrong-canonical-action',expectedRevision:(await destination.host.contentRevision()).revision}),{code:'RESTORE_PAYLOAD_INVALID'});
 });
 
 function acceptedEvents(result){
