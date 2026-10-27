@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
 import { createPresetStore } from '../src/store.mjs';
+import {createReceiptStore} from '../src/receipts.mjs';
 import {PresetError} from '../src/core.mjs';
 import * as module from '../src/host.mjs';
 import {baseEvents,replacement} from './fixtures/narrative-events.mjs';
@@ -253,6 +254,84 @@ test('pending fact reviews and missing current authority stop prose operations w
   f.pending('candidate');await assert.rejects(f.host.regenerateProse({sessionId:'story',basedOn:ref,operationId:'pending'}),{code:'FACT_REVIEW_PENDING'});
   f.pending(null);delete f.services.rpDatabase;await assert.rejects(f.host.storyHistory({sessionId:'story'}),{code:'EFFECTIVE_HISTORY_UNAVAILABLE'});
   const old=await revisionFixture(t,{legacy:true});await old.canonical({packet});const oldRef=(await old.host.narratives({sessionId:'story'})).records[0].ref;assert.equal((await old.host.regenerateProse({sessionId:'story',basedOn:oldRef,operationId:'legacy'})).status,'complete');
+});
+
+test('story history reads pure legacy unbound stories when installed Database projection reports NOT_BOUND',async t=>{
+  const error=Object.assign(new Error('Bind sources to this story first'),{name:'DatabaseError',code:'NOT_BOUND',status:409});
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}}),agent=f.agents.get('story');
+  const empty=await f.host.storyHistory({sessionId:'story'});assert.deepEqual(empty.records,[]);assert.deepEqual(empty.folded,[]);
+  const events=baseEvents(),before=structuredClone(events);agent.session.snapshotEvents=()=>structuredClone(events);
+  const history=await f.host.storyHistory({sessionId:'story'});assert.deepEqual(history.records,(await f.host.narratives({sessionId:'story'})).records);assert.equal(history.records[0].text,'The gate stays shut.');assert.deepEqual(events,before);assert.equal(f.calls.length,0);
+});
+
+test('story history does not hide Database projection authorization, corruption or unknown errors in legacy stories',async t=>{
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{}}}});
+  for(const code of ['FORBIDDEN','gateway/forbidden','STORE_CORRUPT','UNKNOWN_FAILURE']){
+    const error=Object.assign(new Error('Projection cannot be read'),{code,status:code==='FORBIDDEN'?403:500});f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+    await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  }
+  assert.equal(f.calls.length,0);
+});
+
+test('story history still requires projection for accepted fact versions when Database reports NOT_BOUND',async t=>{
+  const f=await revisionFixture(t);await f.canonical({factReceiptId:'fact-1'});const error=Object.assign(new Error('Bind sources to this story first'),{name:'DatabaseError',code:'NOT_BOUND',status:409});
+  f.services.rpGM.binding=async()=>null;f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);assert.equal((await f.host.narratives({sessionId:'story'})).records.length,1);assert.equal(f.calls.length,2);
+});
+
+for(const stage of ['pending','active'])test(`story history preserves a real ${stage} captured group before it has prose`,async t=>{
+  const projection={schemaVersion:1,latestRoundId:'round',groups:[{roundId:'round',source:{sessionId:'story'},activeReceiptId:stage==='active'?'fact-1':null,factRevision:stage==='active'?1:null,pendingCandidateId:stage==='pending'?'candidate':null}]};
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>projection}}}),history=await f.host.storyHistory({sessionId:'story'});
+  assert.deepEqual(history.records,[]);assert.deepEqual(history.folded,[{groupId:'round',factRoundId:'round',activeFactReceiptId:stage==='active'?'fact-1':null,selectedPresentationId:null,pendingFacts:stage==='pending',versions:[]}]);assert.equal(f.calls.length,0);
+});
+
+test('legacy NOT_BOUND history requires exact installed GM absence evidence and preserves binding lookup errors',async t=>{
+  const error=Object.assign(new Error('Bind sources to this story first'),{name:'DatabaseError',code:'NOT_BOUND',status:409});
+  const f=await fixture(t,{services:{rpGM:{},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  for(const binding of [undefined,{}]){f.services.rpGM.binding=async()=>binding;await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);}
+  const denied=Object.assign(new Error('Binding access denied'),{code:'gateway/forbidden'});f.services.rpGM.binding=async()=>{throw denied;};
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===denied);assert.equal(f.calls.length,0);
+});
+
+test('NOT_BOUND history retains standalone packet writer versions without fact links',async t=>{
+  const f=await revisionFixture(t,{legacy:true});await f.canonical({packet});const basedOn=(await f.host.narratives({sessionId:'story'})).records[0].ref;
+  assert.equal((await f.host.regenerateProse({sessionId:'story',basedOn,operationId:'packet-version'})).status,'complete');
+  const before=structuredClone(f.events),calls=f.calls.length;f.services.rpDatabase={capabilities:{factReview:1},factReviewProjection:async()=>{throw Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'});}};
+  const history=await f.host.storyHistory({sessionId:'story'});assert.equal(history.records[0].text,'New prose.');assert.equal(history.records[0].narrativeVersion.kind,'writer-regeneration');
+  delete f.services.rpGM;assert.deepEqual(await f.host.storyHistory({sessionId:'story'}),history);assert.deepEqual(f.events,before);assert.equal(f.calls.length,calls);
+});
+
+test('NOT_BOUND history rejects active fact-linked failures but permits their causally removed audit',async t=>{
+  const f=await revisionFixture(t,{stages:[{commit:true},new Error('writer failed')]});await assert.rejects(f.canonical({factReceiptId:'fact-1'}));
+  const error=Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'});f.services.rpGM.binding=async()=>null;f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);assert.deepEqual((await f.host.narratives({sessionId:'story'})).records,[]);
+  const start=f.events.find(event=>event.type==='assistant/message').seq,end=f.events.find(event=>event.type==='tool/result').seq;
+  f.agent.session.append('user/message',{source:{kind:'runtime-context'},content:[]},{surfaceOp:{op:'replace',startSeq:start,endSeq:end}});
+  assert.deepEqual((await f.host.storyHistory({sessionId:'story'})).records,[]);assert.equal(f.calls.length,2);
+});
+
+test('NOT_BOUND history does not call an active prepared fact receipt legacy before a canonical result exists',async t=>{
+  const error=Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'}),f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}});
+  const events=baseEvents().slice(0,5);f.agents.get('story').session.snapshotEvents=()=>structuredClone(events);
+  const receipts=await createReceiptStore({directory:join(f.directory,'presentations')});await receipts.create({sessionId:'story',contextKey:'["story","assistant","present"]',status:'prepared',factReceiptId:'fact-prepared'});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);assert.equal(f.calls.length,0);
+});
+
+test('legacy NOT_BOUND history still rejects a malformed successful Database projection',async t=>{
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>({schemaVersion:1,latestRoundId:null,groups:'invalid'})}}});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),{code:'EFFECTIVE_HISTORY_UNAVAILABLE'});assert.equal(f.calls.length,0);
+});
+
+for(const toolName of ['rp_commit_turn','rp_propose_turn'])test(`NOT_BOUND history honors active canonical ${toolName} sources through compaction and causal removal`,async t=>{
+  const error=Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'}),f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}}),events=baseEvents();
+  events[3].data.message.content[0].name=toolName;events[4].data.name=toolName;delete events[5].data.meta;
+  f.agents.get('story').session.snapshotEvents=()=>structuredClone(events);
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  events.push({seq:7,type:'user/message',surfaceOp:{op:'replace',startSeq:2,endSeq:5},sourceEventSeqs:[2,3,4,5],data:{source:{kind:'compact-checkpoint'}}});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  events.push({seq:8,type:'user/message',surfaceOp:{op:'replace',startSeq:7,endSeq:7},data:{source:{kind:'runtime-context'}}});
+  assert.deepEqual((await f.host.storyHistory({sessionId:'story'})).records,[]);assert.equal(f.calls.length,0);
 });
 
 test('revision transfer validates optional metadata and canonical source agreement without copying Database truth',async t=>{

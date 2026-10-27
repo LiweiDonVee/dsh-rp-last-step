@@ -310,7 +310,36 @@ export async function createRpLastStepHost(ctx, options = {}) {
     return projection;
   }
   async function effectiveHistory(id,agent,signal,events){
-    return projectStoryHistory(id,events??await narrativeEvents(id,agent,signal),await factProjection(id,agent,signal));
+    const source=events??await narrativeEvents(id,agent,signal);
+    let projection;
+    try{projection=await factProjection(id,agent,signal);}
+    catch(error){if(error?.code!=='NOT_BOUND'||!await pureLegacyHistory(id,source,signal))throw error;}
+    return projectStoryHistory(id,source,projection);
+  }
+  async function pureLegacyHistory(id,events,signal){
+    const linked=value=>[value,value?.narrativeVersion].some(record=>record&&['factReceiptId','factRoundId','factRevision'].some(key=>record[key]!==undefined));
+    if(readNarratives(id,events).some(record=>linked(record)||linked(events.find(event=>event.seq===record.ref.baseResultSeq)?.data.meta?.rpLastStep?.record)))return false;
+    const contexts=new Set(activePresentationContexts(id,events));
+    if((await receipts.list(id)).some(receipt=>contexts.has(receipt.contextKey)&&linked(receipt)))return false;
+    if(activeGmFactResult(events))return false;
+    const gm=ctx.get?.('rpGM');
+    return gm==null||typeof gm.binding==='function'&&await gm.binding({sessionId:id,signal})===null;
+  }
+  function activeGmFactResult(input){
+    const events=[...input].sort((a,b)=>a.seq-b.seq),nodes=[],coverage=new Map(),bySeq=new Map(events.map(event=>[event.seq,event]));
+    for(const event of events){
+      if(event.surfaceOp==='append'){nodes.push(event.seq);coverage.set(event.seq,[event.seq]);continue;}
+      if(event.surfaceOp?.op!=='replace')continue;
+      const start=nodes.indexOf(event.surfaceOp.startSeq),end=nodes.indexOf(event.surfaceOp.endSeq);if(start<0||end<start)continue;
+      const kept=event.type==='user/message'&&event.data?.source?.kind==='compact-checkpoint'?nodes.slice(start,end+1).flatMap(seq=>coverage.get(seq)??[seq]):[];
+      coverage.set(event.seq,[...kept,event.seq]);nodes.splice(start,end-start+1,event.seq);
+    }
+    const active=new Set(nodes.flatMap(seq=>coverage.get(seq)??[seq]));
+    return events.some(event=>{
+      if(event.type!=='tool/result'||!active.has(event.seq)||event.data?.message?.isError===true||event.sourceEventSeqs?.length!==1)return false;
+      const call=bySeq.get(event.sourceEventSeqs[0]),message=event.data.message,assistant=call&&events.findLast(item=>item.seq<call.seq&&item.type==='assistant/message'&&item.data?.turn===call.data?.turn&&item.data?.step===call.data?.step),model=assistant?.data?.message;
+      return call?.type==='tool/call'&&['rp_commit_turn','rp_propose_turn'].includes(call.data?.name)&&message?.role==='tool'&&message.source?.kind==='tool'&&message.source.callId===call.data.callId&&message.toolCallId===call.data.callId&&event.data.turn===call.data.turn&&event.data.step===call.data.step&&active.has(assistant?.seq)&&model?.source?.kind==='model'&&model.content?.some(block=>block.type==='tool-call'&&block.id===call.data.callId&&block.name===call.data.name);
+    });
   }
   function needsFactReview(state){return state?.payload?.receipts?.some(receipt=>receipt.narrativeVersion?.factRoundId);}
   function factTransferRequirement(state){return needsFactReview(state)&&(ctx.get?.('rpDatabase')?.capabilities?.factReview!==1||typeof ctx.get?.('rpDatabase')?.factReviewProjection!=='function');}
