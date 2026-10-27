@@ -319,8 +319,16 @@ export async function createRpLastStepHost(ctx, options = {}) {
   async function pureLegacyHistory(id,events,signal){
     const linked=value=>[value,value?.narrativeVersion].some(record=>record&&['factReceiptId','factRoundId','factRevision'].some(key=>record[key]!==undefined));
     if(readNarratives(id,events).some(record=>linked(record)||linked(events.find(event=>event.seq===record.ref.baseResultSeq)?.data.meta?.rpLastStep?.record)))return false;
-    const contexts=new Set(activePresentationContexts(id,events));
-    if((await receipts.list(id)).some(receipt=>contexts.has(receipt.contextKey)&&linked(receipt)))return false;
+    let owner=id,branch={...await canonicalSession(id,undefined,signal),events},prefix=events;
+    const seen=new Set();
+    while(true){
+      seen.add(owner);
+      const contexts=new Set(activePresentationContexts(owner,events)),inherited=new Set(activePresentationContexts(owner,prefix));
+      if((await receipts.list(owner)).some(receipt=>contexts.has(receipt.contextKey)&&inherited.has(receipt.contextKey)&&linked(receipt)))return false;
+      const parentId=branch.header.parentSession;if(!parentId)break;
+      if(seen.has(parentId)||!await descendsFrom(branch,parentId,signal))throw new PresetError('SESSION_ANCESTRY_REQUIRED','The inherited presentation prefix could not be verified',409);
+      prefix=prefix.slice(0,branch.inheritedEventCount);owner=parentId;branch=await canonicalSession(parentId,undefined,signal);
+    }
     if(activeGmFactResult(events))return false;
     const gm=ctx.get?.('rpGM');
     return gm==null||typeof gm.binding==='function'&&await gm.binding({sessionId:id,signal})===null;

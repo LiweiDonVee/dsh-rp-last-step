@@ -318,6 +318,36 @@ test('NOT_BOUND history does not call an active prepared fact receipt legacy bef
   await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);assert.equal(f.calls.length,0);
 });
 
+for(const status of ['failed','prepared'])test(`NOT_BOUND child history rejects inherited ${status} fact receipts without changing their original owner or prefix`,async t=>{
+  const f=await revisionFixture(t,{stages:[{commit:true},new Error('writer failed')]}),receiptStore=await createReceiptStore({directory:join(f.directory,'presentations')});
+  let release,pending;
+  if(status==='prepared'){
+    let entered;const started=new Promise(resolve=>{entered=resolve;}),hold=new Promise(resolve=>{release=resolve;});
+    f.services.rpContext.prepare=async()=>{entered();await hold;throw new Error('Preparation stopped after read assertions');};pending=f.canonical({factReceiptId:'fact-1'});await started;
+  }else await assert.rejects(f.canonical({factReceiptId:'fact-1'}));
+  try{
+    const parentEvents=structuredClone(f.events),childEvents=structuredClone(parentEvents),child=f.makeAgent('child');
+    child.session.header={id:'child',parentSession:'story',isSeeded:true};child.session.inheritedEventCount=parentEvents.length;child.session.snapshotEvents=()=>structuredClone(childEvents);f.agents.set('child',child);
+    await f.host.inheritSession({parentSessionId:'story',sessionId:'child'});
+    const original=await receiptStore.list('story'),error=Object.assign(new Error('Bind sources to this story first'),{code:'NOT_BOUND',status:409}),calls=f.calls.length;
+    assert.equal(original[0].status,status);assert.equal(original[0].sessionId,'story');assert.equal(JSON.parse(original[0].contextKey)[0],'story');assert.deepEqual(await receiptStore.list('child'),[]);
+    f.services.rpGM.binding=async()=>null;f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+    await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+    await assert.rejects(f.host.storyHistory({sessionId:'child'}),cause=>cause===error);
+    assert.equal(f.calls.length,calls);assert.deepEqual(f.events,parentEvents);assert.deepEqual(childEvents,parentEvents);assert.deepEqual(await receiptStore.list('story'),original);assert.deepEqual(await receiptStore.list('child'),[]);
+    const start=childEvents.find(event=>event.type==='assistant/message').seq,end=childEvents.find(event=>event.type==='tool/result')?.seq??start;
+    childEvents.push({seq:childEvents.length,type:'user/message',surfaceOp:{op:'replace',startSeq:start,endSeq:end},data:{source:{kind:'runtime-context'},content:[]}});
+    assert.deepEqual((await f.host.storyHistory({sessionId:'child'})).records,[]);assert.deepEqual(childEvents.slice(0,parentEvents.length),parentEvents);assert.deepEqual(f.events,parentEvents);assert.deepEqual(await receiptStore.list('story'),original);assert.equal(f.calls.length,calls);
+  }finally{release?.();if(pending)await pending.catch(()=>{});}
+});
+
+test('NOT_BOUND child history retains a verified inherited packet failure as legacy',async t=>{
+  const f=await revisionFixture(t,{legacy:true,stages:[{commit:true},new Error('packet writer failed')]});await assert.rejects(f.canonical({packet}));
+  const parentEvents=structuredClone(f.events),child=f.makeAgent('child');child.session.header={id:'child',parentSession:'story',isSeeded:true};child.session.inheritedEventCount=parentEvents.length;child.session.snapshotEvents=()=>structuredClone(parentEvents);f.agents.set('child',child);
+  await f.host.inheritSession({parentSessionId:'story',sessionId:'child'});f.services.rpDatabase={capabilities:{factReview:1},factReviewProjection:async()=>{throw Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'});}};
+  const calls=f.calls.length;assert.deepEqual((await f.host.storyHistory({sessionId:'child'})).records,[]);assert.deepEqual(f.events,parentEvents);assert.equal(f.calls.length,calls);
+});
+
 test('legacy NOT_BOUND history still rejects a malformed successful Database projection',async t=>{
   const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>({schemaVersion:1,latestRoundId:null,groups:'invalid'})}}});
   await assert.rejects(f.host.storyHistory({sessionId:'story'}),{code:'EFFECTIVE_HISTORY_UNAVAILABLE'});assert.equal(f.calls.length,0);
