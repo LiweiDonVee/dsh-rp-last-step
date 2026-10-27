@@ -1,4 +1,12 @@
-# 0.1.0 独立仓库验收
+# LastStep 验收记录
+
+## 当前 0.4.0 源码检查点 — 2026-10-27
+
+产品源码 `e3c6dda54792ed6c873d71cb069c20dd03f34b7a` 的 scoped spec／quality 审查已通过，先前来源、事实版本 guard 与 transfer/replay 问题已关闭。冻结 0.4.0 包 SHA256 为 `054f277d729e49284d71032ea1f6dcbaadf7141c364a059d4966a440f767774a`，对应本次 Markdown 更新之前的产品包。作者记录的组件检查为 182 host +26 UI、lint/build/package 通过；文档收尾未重跑这些检查。
+
+事实审批与两层重生的新组合 native 验收尚未完成；源码 PASS、组件 fixtures 与旧 smoke 不能代替新包的真实命令、来源、模型计数、冷恢复和跨 home 证明。当前使用／接口见[使用说明](usage.md)与[架构](architecture.md)。[0.3 rc.3 原生记录](acceptance-0.3.md)和[旧组合记录](fullstack-acceptance.md)仅按各自版本／哈希保留。
+
+## 历史 0.1.0 独立仓库验收
 
 2026-10-24，Node 24 / pnpm 11.9 / Windows，官方 DSH 0.2.1-rc.2。构建与测试从本仓库运行，不引用其他项目源码。
 

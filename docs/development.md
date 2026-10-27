@@ -10,7 +10,7 @@ pnpm check
 pnpm package
 ```
 
-`check` 运行零 warning lint、Node 宿主/内核测试、Vitest React UI 测试和 host/client 生产构建。`package` 生成 `artifacts/dsh-rp-last-step-0.3.0.tgz` 与 `SHA256SUMS.txt`。
+`check` 运行零 warning lint、Node 宿主/内核测试、Vitest React UI 测试和 host/client 生产构建。当前 0.4.0 的 `package` 生成 `artifacts/dsh-rp-last-step-0.4.0.tgz` 与 `SHA256SUMS.txt`。
 
 构建会将 `skills/adapting-sillytavern-rp-presets/` 复制到 `dist/skills/`，宿主注册这份标准 skill 正文与资源目录。发布包包含打包后的 host、ModuleLoader client、skill、manifest、Cordis patch、README 和许可证；开发依赖不进入安装要求。
 
@@ -32,6 +32,8 @@ pnpm smoke
 
 ## 三插件联用验收
 
+下面保留旧三插件 harness 的范围和输入示例，不是 0.4 新审批／正文修订的验收命令；当前源码与待验收边界见[验收记录](acceptance.md)。
+
 从相关 Release 下载另外两个已构建包，再执行：
 
 ```powershell
@@ -42,7 +44,7 @@ pnpm smoke -- --integration
 
 将示例下载路径改为本机文件位置。联用模式仍使用新 home 和模拟模型，检查迁移/组装/正文各自路由、未绑定工具隔离、待选模型、主 Agent 与正文隔离、锁拒绝后的合法填充、安全流、规范回放、复用工具 ID 和 Loop 原生控件。
 
-独立验收结果位于 `.runtime/rp-step-alone-evidence/`，联用结果位于 `.runtime/rp-step-evidence/`。`acceptance.json` 保存受测包哈希；实际验证范围见 [验收记录](acceptance.md)。
+独立验收结果位于 `.runtime/rp-step-alone-evidence/`，联用结果位于 `.runtime/rp-step-evidence/`。`acceptance.json` 保存各次受测包哈希；实际验证范围见[当前与历史验收记录](acceptance.md)。
 
 ## 修改与发布
 
