@@ -26,7 +26,7 @@ flowchart TD
 
 当前 0.4.0 需要 **DSH 0.2.1-rc.3** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
 
-1. 当前 0.4.0 为本地构建／待发布包 `dsh-rp-last-step-0.4.0.tgz`（2026-10-27）；[Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases) 仅以实际列出的版本为准，未发布时不要用旧版本代替新能力。
+1. 安装包为 `dsh-rp-last-step-0.4.0.tgz`，下载入口为 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases)。
 2. 完全退出 DSH，包括后台进程。在文件所在目录执行：
 
 ```powershell
@@ -114,7 +114,7 @@ $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runti
 
 ST 脚本、正则、插入深度、世界书标记和宏不自动获得完整运行语义。原始字段保留供回溯，迁移报告明确未适配项；模型生成的迁移内容仍需人工审阅。
 
-生成审计包含旧稿和失败记录，当前分支正文来自有效规范来源。手改和候选只改变表达，不回滚或重新执行状态工具。可选复核模型、模拟引擎和媒体功能不在本版范围。更多说明见 [使用与恢复](docs/usage.md)、[当前源码状态与历史验收](docs/acceptance.md) 和 [0.3 原生验收](docs/acceptance-0.3.md)。0.4 源码审查已通过，新增审批／两层重生的实际组合 native 验收尚未完成。
+生成审计包含旧稿和失败记录，当前分支正文来自有效规范来源。手改和候选只改变表达，不回滚或重新执行状态工具。可选复核模型、模拟引擎和媒体功能不在本版范围。更多说明见 [使用与恢复](docs/usage.md)、[当前与历史验收](docs/acceptance.md) 和 [0.3 原生验收](docs/acceptance-0.3.md)。V6 七包组合的审批／两层重生五组实际功能断言全部通过，包含冻结正文、当前事实选择与不同 home 冷恢复；受测包和发行验证边界在验收页分别记录。
 
 ## 开发
 

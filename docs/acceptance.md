@@ -1,10 +1,16 @@
 # LastStep 验收记录
 
-## 当前 0.4.0 源码检查点 — 2026-10-27
+## 当前 0.4.0 组合原生证据 — 2026-10-27
+
+官方 DSH 0.2.1-rc.3 隔离 home 的 V6 七包运行中，审批／两层重生五组实际功能断言 **5/5 通过**。冻结材料、当前 writer 路由、事实版本 guard、追加正文、作者注时序及不同 home 冷恢复均有实际 owner／工具证据。writer 重生只重跑正文生成阶段，原生主模型调度另计；两个事实结算恢复端点全模型 0，写作需明确继续。
+
+V6 manifest SHA256 为 `79aa41cb6b3602b3fa2a02cf27cdd6b0bd3b72f34c7ba6a2b078a620b765aeeb`，本次受测 LastStep 0.4.0 archive 为 `45d7bb2028d34266fc5b21382d97cebec0bf7665759861c60ba8fa38f6203716`。来源、计数、旧九场景／Story Kit 十三阶段的分别归属及限制见 [Studio 当前原生证据](https://github.com/LiweiDonVee/dsh-rp-studio/blob/main/docs/native-acceptance.md#v6-approval-and-regeneration)。五组 raw 保留 `checkpoint-passed`／`finalAcceptance:false`；发行包与最终 CI 另校验，下载包按同一 Release 的 SHA256SUMS 核对。
+
+## 0.4.0 源码检查点（V6 之前）— 2026-10-27
 
 产品源码 `e3c6dda54792ed6c873d71cb069c20dd03f34b7a` 的 scoped spec／quality 审查已通过，先前来源、事实版本 guard 与 transfer/replay 问题已关闭。冻结 0.4.0 包 SHA256 为 `054f277d729e49284d71032ea1f6dcbaadf7141c364a059d4966a440f767774a`，对应本次 Markdown 更新之前的产品包。作者记录的组件检查为 182 host +26 UI、lint/build/package 通过；文档收尾未重跑这些检查。
 
-事实审批与两层重生的新组合 native 验收尚未完成；源码 PASS、组件 fixtures 与旧 smoke 不能代替新包的真实命令、来源、模型计数、冷恢复和跨 home 证明。当前使用／接口见[使用说明](usage.md)与[架构](architecture.md)。[0.3 rc.3 原生记录](acceptance-0.3.md)和[旧组合记录](fullstack-acceptance.md)仅按各自版本／哈希保留。
+源码及组件检查与上节后续 V6 组合原生运行分开记录。当前使用／接口见[使用说明](usage.md)与[架构](architecture.md)。[0.3 rc.3 原生记录](acceptance-0.3.md)和[旧组合记录](fullstack-acceptance.md)仅按各自版本／哈希保留。
 
 ## 历史 0.1.0 独立仓库验收
 
