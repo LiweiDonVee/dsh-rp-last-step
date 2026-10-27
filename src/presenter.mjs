@@ -307,7 +307,7 @@ function migrationCandidate(profile, response) {
 }
 
 /** Post-simulation presentation only; it owns no world state and never reads main history. */
-export function createPresenter({ store, receipts, callModel, resolveModels, prepareContext, presentationOutcome, activeContexts, publish = () => {}, skillText = '', skillReference = '', maxAssemblySteps = 8, maxMigrationAttempts = 3 } = {}) {
+export function createPresenter({ store, receipts, callModel, resolveModels, prepareContext, presentationOutcome, activeContexts, validateRetry,publish = () => {}, skillText = '', skillReference = '', maxAssemblySteps = 8, maxMigrationAttempts = 3 } = {}) {
   if (!store || !receipts || typeof callModel !== 'function') throw new TypeError('store, receipts and callModel are required');
   for (const [name, value] of Object.entries({ maxAssemblySteps, maxMigrationAttempts })) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive integer`);
   const active = new Set();
@@ -355,7 +355,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
     const gate=thoughtGate(async delta=>{signal?.throwIfAborted();await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'rendering',delta})});
     let streamed=false;
     const writer=await callModel({sessionId,stageId:STAGES.render,config:actualModels.render,system:RENDER_SYSTEM,
-       input:snapshot({packet:composition.packet,modules:composition.compiled.messages,recentProse:composition.recentProse,...composition.contextPreparation?{context:composition.contextPreparation.materials}:{},...composition.storySnapshot?{story:composition.storySnapshot}:{}}),signal,
+       input:snapshot({packet:composition.packet,modules:composition.compiled.messages,recentProse:composition.recentProse,...composition.contextPreparation?{context:composition.contextPreparation.materials}:{},...composition.storySnapshot?{story:composition.storySnapshot}:{},...composition.instruction!==undefined?{instruction:composition.instruction}:{}}),signal,
       onText:async delta=>{streamed=true;await gate.push(delta)},
     });
     signal?.throwIfAborted();if(!streamed)await gate.push(writer.text);
@@ -366,6 +366,24 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
   }
 
   return Object.freeze({
+    async regenerate({sessionId,contextKey,original,instruction='',baseModel,signal,ownerOperation}={}){
+      nonempty(sessionId,'Session id');nonempty(contextKey,'Context key');
+      if(!original||!DONE.has(original.status)||!Array.isArray(original.compiled?.messages))fail('REWRITE_UNAVAILABLE','A successful complete frozen composition is required',409);
+      if(typeof instruction!=='string')fail('INVALID_REQUEST','Writing guidance must be text');
+      const key=JSON.stringify([sessionId,contextKey]);if(active.has(key))fail('PRESENTATION_BUSY','This presentation is already running',409);
+      active.add(key);let receipt;
+      try{
+        signal?.throwIfAborted();
+        const base=resolveModelConfig(baseModel),route=await resolveModels?.({sessionId,baseModel:base,stage:'render'})??{};
+        const models={render:resolveModelConfig(base,route.render??{})};
+        const composition=snapshot({packet:original.packet,profile:original.profile,overlay:original.overlay,compiled:original.compiled,recentProse:original.recentProse??[],contextPreparation:original.contextPreparation,...original.storySnapshot?{storySnapshot:original.storySnapshot}:{},models,instruction});
+        const prior=original.narrativeVersion,narrativeVersion={schemaVersion:1,groupId:prior?.groupId??original.id,kind:'writer-regeneration',basePresentationId:original.id,...prior?.factRoundId?{factRoundId:prior.factRoundId,factRevision:prior.factRevision}:{}};
+        receipt=await receipts.create({...composition,sessionId,contextKey,status:'prepared',stageId:STAGES.render,text:'',playerAction:original.packet.playerAction,regenerateOf:original.id,narrativeVersion,...original.factReceiptId?{factReceiptId:original.factReceiptId}:{},...ownerOperation?{ownerOperation}:{},profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash});
+        await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'prepared',models});
+        return publicReceipt(await renderFrozen(receipt,composition,sessionId,signal));
+      }catch(error){if(receipt)await markFailed(receipt,error,sessionId);if(signal?.aborted)signal.throwIfAborted();if(error instanceof PresetError||error?.name==='AbortError')throw error;fail('PRESENTATION_FAILED','The writer regeneration failed',502);}
+      finally{active.delete(key);}
+    },
     async draft({sessionId,receipt,instruction='',baseModel,signal,onText}={}){
       if(!Array.isArray(receipt?.compiled?.messages))fail('DRAFT_UNAVAILABLE','No complete frozen writer snapshot exists',409);
       if(typeof instruction!=='string')fail('INVALID_DRAFT','Writing guidance must be text');
@@ -379,7 +397,7 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
       const text=await gate.end();if(!text.trim())fail('EMPTY_NARRATIVE','The writer returned no public narrative',502);
       return {text,models:{render:actualConfig(config,result.config)}};
     },
-    async present({ sessionId, contextKey, packet: input, baseModel, recentProse = [], factReceiptId, story, openingText, signal } = {}) {
+    async present({ sessionId, contextKey, packet: input, baseModel, recentProse = [], factReceiptId, factRoundId,factRevision,ownerOperation,story, openingText, signal } = {}) {
       nonempty(sessionId, 'Session id');
       nonempty(contextKey, 'Context key');
       const packet = normalizeDirectionPacket(input);
@@ -409,8 +427,8 @@ export function createPresenter({ store, receipts, callModel, resolveModels, pre
           sessionId, contextKey, status: 'prepared', stageId: STAGES.assemble, text: '',
           packet, recentProse: prose, profile: binding.profile, overlay: binding.overlay,
           revision: initial.revision, profileId: binding.profileId, profileVersion: binding.version,
-          profileHash: hash(binding.profile), models,contextPreparation:null,...(factReceiptId?{factReceiptId}:{}),...(storySnapshot?{storySnapshot}:{}),
-        });
+          profileHash: hash(binding.profile), models,contextPreparation:null,...(factReceiptId?{factReceiptId}:{}),...(storySnapshot?{storySnapshot}:{}),...ownerOperation?{ownerOperation,playerAction:packet.playerAction}:{},
+        },{originalVersion:{factRoundId,factRevision}});
         await emit({ sessionId, presentationId: receipt.id, stageId: STAGES.assemble, status: 'prepared', models });
         if(openingText!==undefined){
           nonempty(openingText,'Opening text');signal?.throwIfAborted();
@@ -544,21 +562,22 @@ Return an owner-review draft and candid blockers, never ready/bind/execute. The 
       }
     },
 
-    async rewrite({sessionId,presentationId,contextKey,baseModel,signal}={}){
+    async rewrite({sessionId,presentationId,contextKey,baseModel,signal,ownerOperation}={}){
       nonempty(sessionId,'Session id');nonempty(contextKey,'Context key');
       const key=JSON.stringify([sessionId,contextKey]);if(active.has(key))fail('PRESENTATION_BUSY','This presentation is already running',409);
       active.add(key);let receipt;
       try{
         signal?.throwIfAborted();const original=await owned(sessionId,presentationId);
+        await validateRetry?.({sessionId,receipt:original,signal});
         let contexts=await activeContexts?.({sessionId});
         const eligible=retryEligibility(await receipts.list(sessionId),original,contexts);
         if(eligible.code==='REWRITE_SOURCE_INACTIVE'||contexts!==undefined&&!new Set(contexts).has(contextKey))fail('REWRITE_SOURCE_INACTIVE','The failed presentation source is not active in this story',409);
         const previous=await receipts.findByContextKey(sessionId,contextKey);
         if(previous){if(DONE.has(previous.status))return publicReceipt(previous);fail('PRESENTATION_BUSY','This retry context already has an attempt',409)}
         if(!eligible.canRetry)fail(eligible.code,'This frozen presentation is not eligible for another retry',409);
-        const models=await modelsFor(sessionId,baseModel),frozen=snapshot({packet:original.packet,profile:original.profile,overlay:original.overlay,compiled:original.compiled,recentProse:original.recentProse??[],contextPreparation:original.contextPreparation,...original.factReceiptId?{factReceiptId:original.factReceiptId}:{},...original.storySnapshot?{storySnapshot:original.storySnapshot}:{},models});
+        const models=await modelsFor(sessionId,baseModel),frozen=snapshot({packet:original.packet,profile:original.profile,overlay:original.overlay,compiled:original.compiled,recentProse:original.recentProse??[],contextPreparation:original.contextPreparation,...original.factReceiptId?{factReceiptId:original.factReceiptId}:{},...original.narrativeVersion?{narrativeVersion:original.narrativeVersion}:{},...original.instruction!==undefined?{instruction:original.instruction}:{},...original.storySnapshot?{storySnapshot:original.storySnapshot}:{},models});
         contexts=await activeContexts?.({sessionId});
-        receipt=await receipts.create({...frozen,sessionId,contextKey,rewriteOf:original.id,status:'prepared',stageId:STAGES.render,text:'',profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash},{activeContexts:contexts});
+        receipt=await receipts.create({...frozen,sessionId,contextKey,rewriteOf:original.id,...ownerOperation?{ownerOperation}:{},status:'prepared',stageId:STAGES.render,text:'',profileId:original.profileId,profileVersion:original.profileVersion,profileHash:original.profileHash},{activeContexts:contexts});
         await emit({sessionId,presentationId:receipt.id,stageId:STAGES.render,status:'prepared',models});
         return publicReceipt(await renderFrozen(receipt,frozen,sessionId,signal));
       }catch(error){if(receipt)await markFailed(receipt,error,sessionId);if(signal?.aborted)signal.throwIfAborted();if(error instanceof PresetError||error?.name==='AbortError')throw error;fail('PRESENTATION_FAILED','The presentation retry failed',502)}
@@ -585,7 +604,7 @@ Return an owner-review draft and candid blockers, never ready/bind/execute. The 
 
     async state(sessionId) {
       const records=await receipts.list(sessionId),contexts=await activeContexts?.({sessionId});
-      return records.map(record=>({...publicReceipt(record),canRetry:retryEligibility(records,record,contexts).canRetry}));
+      return Promise.all(records.map(async record=>{let eligible=retryEligibility(records,record,contexts);if(['failed','cancelled'].includes(record.status))try{await validateRetry?.({sessionId,receipt:record});}catch(error){eligible={canRetry:false,code:error.code};}return{...publicReceipt(record),canRetry:eligible.canRetry,...eligible.code?{retryBlockCode:eligible.code}:{}};}));
     },
   });
 }

@@ -5,8 +5,9 @@ import {isDeepStrictEqual} from 'node:util';
 import {PresetError,validateProfile,applyAgentOperations} from './core.mjs';
 import {normalizeDirectionPacket} from './presenter.mjs';
 import {resolveModelConfig} from './models.mjs';
-import {publicStorySnapshot} from './receipts.mjs';
+import {publicReceipt,publicStorySnapshot} from './receipts.mjs';
 import {readNarratives,sameNarrativeRef,validNarrativeRef} from './narratives.mjs';
+import {validNarrativeVersion,validOwnerOperation} from './versions.mjs';
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value),id=value=>typeof value==='string'&&value.length>0&&value.length<=256,uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu;
 const statuses=new Set(['prepared','assembling','rendering','rendered','complete','failed','cancelled']);
 const put=(target,key,value)=>Object.defineProperty(target,key,{value,enumerable:true,writable:true,configurable:true});
@@ -49,7 +50,7 @@ export function selectState(raw,sessionIds,sessions,additionalProfileRefs=[]){
     for(const [draftId,versions] of Object.entries(raw.drafts.drafts))if(versions.at(-1)?.sessionId===sessionId){put(drafts,draftId,structuredClone(versions));for(const draft of versions){const receipt=raw.receipts[draft.basedOn?.presentationId];if(!receipt)throw new PresetError('RESTORE_REQUIREMENT_MISSING','A candidate requires its original frozen receipt',409);receipts.set(receipt.id,receipt);}}
   }
   const addProfile=(profileId,version,code='RESTORE_REQUIREMENT_MISSING')=>{const key=JSON.stringify([profileId,version]),profile=get(raw.presets.profiles,profileId)?.find(item=>item.version===version);if(!profile)throw new PresetError(code,`A pinned LastStep profile version is unavailable: ${key}`,409);profiles.set(key,profile);if(profile.sourceId!==null){const source=get(raw.presets.sources,profile.sourceId);if(!source)throw new PresetError(code,`An immutable preset source is unavailable for profile: ${key}`,409);sources.set(source.id,source);}};
-  for(const binding of Object.values(bindings))addProfile(binding.profileId,binding.version);for(const receipt of receipts.values()){addProfile(receipt.profileId,receipt.profileVersion);if(receipt.rewriteOf&&!receipts.has(receipt.rewriteOf)){const original=raw.receipts[receipt.rewriteOf];if(!original)throw new PresetError('RESTORE_REQUIREMENT_MISSING','A retry requires its failed source receipt',409);receipts.set(original.id,original);}}
+  for(const binding of Object.values(bindings))addProfile(binding.profileId,binding.version);for(const receipt of receipts.values()){addProfile(receipt.profileId,receipt.profileVersion);for(const parentId of [receipt.rewriteOf,receipt.regenerateOf,receipt.narrativeVersion?.basePresentationId].filter(Boolean))if(!receipts.has(parentId)){const original=raw.receipts[parentId];if(!original)throw new PresetError('RESTORE_REQUIREMENT_MISSING','A writer revision requires its original frozen receipt',409);receipts.set(original.id,original);}}
   for(const receipt of receipts.values())addProfile(receipt.profileId,receipt.profileVersion);
   for(const ref of additionalProfileRefs)addProfile(ref.profileId,ref.version,'EXPORT_REQUIREMENT_MISSING');
   return structuredClone({sessionIds:[...sessionIds],sources:[...sources.values()],profiles:[...profiles.values()],bindings,receipts:[...receipts.values()],drafts});
@@ -63,6 +64,22 @@ function validate(payload,raw,sessionIds){
   for(const [sessionId,binding] of Object.entries(payload.bindings)){requireValue(sessionIds.includes(sessionId)&&object(binding));const profile=getProfile(binding.profileId,binding.version);if(!profile)throw new PresetError('RESTORE_REQUIREMENT_MISSING','The story profile dependency is missing',409);requireValue(profile.status==='ready');applyAgentOperations(profile,binding.overlay,[]);}
   for(const receipt of payload.receipts){requireValue(object(receipt)&&uuid.test(receipt.id)&&!receipts.has(receipt.id)&&id(receipt.sessionId)&&typeof receipt.contextKey==='string'&&statuses.has(receipt.status)&&typeof receipt.text==='string'&&typeof receipt.createdAt==='string');normalizeDirectionPacket(receipt.packet);const profile=getProfile(receipt.profileId,receipt.profileVersion);if(!profile)throw new PresetError('RESTORE_REQUIREMENT_MISSING','A presentation profile dependency is missing',409);requireValue(isDeepStrictEqual(profile,validateProfile(receipt.profile)));applyAgentOperations(profile,receipt.overlay,[]);for(const model of Object.values(receipt.models??{}))requireValue(isDeepStrictEqual(model,resolveModelConfig(model)));if(receipt.storySnapshot!==undefined)requireValue(isDeepStrictEqual(receipt.storySnapshot,publicStorySnapshot(receipt.storySnapshot)));if(receipt.compiled!==undefined)requireValue(Array.isArray(receipt.compiled.messages)&&receipt.compiled.messages.every(message=>['system','user','assistant'].includes(message.role)&&typeof message.content==='string'));receipts.set(receipt.id,receipt);}
   for(const receipt of payload.receipts){let current=receipt;const seen=new Set();while(current.rewriteOf){requireValue(!seen.has(current.id));seen.add(current.id);const parent=receipts.get(current.rewriteOf)??get(raw.receipts,current.rewriteOf);if(!parent)throw new PresetError('RESTORE_REQUIREMENT_MISSING','The failed retry ancestor is missing',409);requireValue(parent.sessionId===receipt.sessionId&&['failed','cancelled'].includes(parent.status));current=parent;}}
+  for(const receipt of payload.receipts){
+    if(receipt.narrativeVersion!==undefined)requireValue(validNarrativeVersion(receipt.narrativeVersion));
+    if(receipt.ownerOperation!==undefined)requireValue(validOwnerOperation(receipt.ownerOperation));
+    if(receipt.playerAction!==undefined)requireValue(typeof receipt.playerAction==='string'&&receipt.playerAction===receipt.packet.playerAction);
+    if(receipt.instruction!==undefined)requireValue(typeof receipt.instruction==='string');
+    if(receipt.regenerateOf!==undefined)requireValue(uuid.test(receipt.regenerateOf)&&receipt.narrativeVersion?.kind==='writer-regeneration'&&receipt.narrativeVersion.basePresentationId===receipt.regenerateOf);
+    if(receipt.narrativeVersion?.factRoundId)requireValue(id(receipt.factReceiptId));
+    if(receipt.narrativeVersion?.kind==='writer-regeneration'){
+      const parent=receipts.get(receipt.narrativeVersion.basePresentationId)??get(raw.receipts,receipt.narrativeVersion.basePresentationId);
+      if(!parent)throw new PresetError('RESTORE_REQUIREMENT_MISSING','The canonical writer ancestor is missing',409);
+      requireValue(['rendered','complete'].includes(parent.status)&&parent.factReceiptId===receipt.factReceiptId&&(parent.narrativeVersion?.groupId??parent.id)===receipt.narrativeVersion.groupId);
+      for(const key of ['packet','profile','overlay','compiled','recentProse','contextPreparation','storySnapshot'])requireValue(isDeepStrictEqual(parent[key],receipt[key]));
+    }
+    const projection=receipt.contextPreparation?.historyProjection;
+    if(projection!==undefined)requireValue(object(projection)&&Object.keys(projection).length===4&&projection.schemaVersion===1&&id(projection.projectionKey)&&['selectedPresentationIds','activeFactReceiptIds'].every(key=>Array.isArray(projection[key])&&projection[key].every(id)&&new Set(projection[key]).size===projection[key].length));
+  }
   for(const [draftId,versions] of Object.entries(payload.drafts)){requireValue(id(draftId)&&Array.isArray(versions)&&versions.length>0);let previous=0;for(const draft of versions){requireValue(draft.id===draftId&&sessionIds.includes(draft.sessionId)&&Number.isSafeInteger(draft.version)&&draft.version>previous&&validNarrativeRef(draft.basedOn)&&draft.basedOn.sessionId===draft.sessionId&&['writer','manual'].includes(draft.kind)&&['draft','generating','ready','failed'].includes(draft.status)&&typeof draft.text==='string');previous=draft.version;if(!receipts.has(draft.basedOn.presentationId)&&!raw.receipts[draft.basedOn.presentationId])throw new PresetError('RESTORE_REQUIREMENT_MISSING','The candidate frozen presentation is missing',409);if(draft.models)requireValue(isDeepStrictEqual(draft.models,{render:resolveModelConfig(draft.models.render)}));}}
 }
 export function preflightState(raw,sessionIds,state){
@@ -91,9 +108,10 @@ export function validateCanonicalState(payload,sessions){
     // A rendered receipt may legitimately lag canonical completion bookkeeping.
     if(accepted.length){
       requireValue(['rendered','complete'].includes(receipt.status));
-      requireValue(accepted.some(event=>{const record=event.data.meta.rpLastStep.record;return record.text===receipt.text&&record.factReceiptId===receipt.factReceiptId&&record.rewriteOf===receipt.rewriteOf;}));
+      requireValue(accepted.some(event=>{const record=event.data.meta.rpLastStep.record;return record.text===receipt.text&&record.factReceiptId===receipt.factReceiptId&&record.rewriteOf===receipt.rewriteOf&&record.regenerateOf===receipt.regenerateOf&&record.playerAction===publicReceipt(receipt).playerAction&&isDeepStrictEqual(record.narrativeVersion,receipt.narrativeVersion)&&isDeepStrictEqual(record.ownerOperation,receipt.ownerOperation);}));
     }else requireValue(receipt.status!=='complete');
   }
+  for(const receipt of payload.receipts)if(receipt.narrativeVersion?.kind==='writer-regeneration')requireValue([...sessions.values()].some(snapshot=>readNarratives(snapshot.header.id,snapshot.events).some(record=>record.ref.presentationId===receipt.narrativeVersion.basePresentationId)));
   for(const versions of Object.values(payload.drafts))for(const draft of versions){const snapshot=sessions.get(draft.sessionId);requireValue(snapshot&&readNarratives(draft.sessionId,snapshot.events.filter(event=>event.seq<=draft.basedOn.resultSeq)).some(record=>sameNarrativeRef(record.ref,draft.basedOn)));}
 }
 export async function mergeState(directory,raw,state,{restoreId,sessionIds,generation,hash}){

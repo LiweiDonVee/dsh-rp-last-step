@@ -1,5 +1,7 @@
 # 0.3 原生验收
 
+本页为历史 0.3 范围；当前 0.4 源码检查点及新流程待验收状态见[验收记录](acceptance.md)。下列结果不迁移为 0.4 新流程 PASS。
+
 环境：Windows、Node 24、pnpm 11.9、实际官方 DSH 0.2.1-rc.3。执行 `pnpm check`、`pnpm package`、`pnpm smoke:drafts`；包哈希见产物 SHA256SUMS 与运行生成的 acceptance.json。
 
 原生脚本将当前仓库的真实 tgz 安装到隔离 web profile。所有模型来自明确的本地 deterministic adapter，事实工具是合成的 gate 判定；Context 是合同夹具。没有用户角色卡、脚本执行或真实付费提供方。

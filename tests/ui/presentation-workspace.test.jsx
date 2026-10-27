@@ -13,6 +13,17 @@ function fixture(){
 function mount(f){expect(typeof module.PresentationWorkspace).toBe('function');return render(<module.PresentationWorkspace sessionId="story" visible client={f.client}/>)}
 
 describe('LastStep native prose controls',()=>{
+  it('uses effective history, exposes independent writer regeneration and folds canonical old versions',async()=>{
+    const f=fixture(),nextRef={...ref,presentationId:'new-prose',assistantMessageId:'new-assistant',callSeq:9,baseResultSeq:10,resultSeq:10};
+    f.client.storyHistory=vi.fn(async()=>({schemaVersion:1,records:[{id:'new',ref:nextRef,text:'Current revision prose.'}],folded:[{groupId:'round',factRoundId:'round',activeFactReceiptId:'fact-2',selectedPresentationId:'new-prose',pendingFacts:false,versions:[{presentationId:'formal',factReceiptId:'fact-1',resultSeq:5},{presentationId:'new-prose',factReceiptId:'fact-2',resultSeq:10}]}],projectionKey:'key'}));
+    f.client.presentationSummaries.mockResolvedValue({presentations:[],canRegenerate:true,capabilities:{narrativeRevisions:1,regenerateDispatch:true,retryDispatch:true}});
+    f.client.regenerateProse=vi.fn(async()=>({status:'complete',presentationId:'regenerated'}));mount(f);
+    await screen.findByText('Current revision prose.');expect(screen.getByRole('region',{name:'当前分支正式正文'})).not.toHaveTextContent('Accepted current prose.');
+    expect(screen.getByText('Accepted current prose.').closest('details')).not.toHaveAttribute('open');
+    fireEvent.change(screen.getByRole('textbox',{name:'写作调整'}),{target:{value:'Shorter.'}});fireEvent.click(screen.getByRole('button',{name:'只重新写作'}));
+    await waitFor(()=>expect(f.client.regenerateProse).toHaveBeenCalledWith('story',{basedOn:nextRef,operationId:expect.any(String),instruction:'Shorter.'},expect.any(AbortSignal)));
+    expect(f.client.createDraft).not.toHaveBeenCalled();expect(f.client.adoptDraft).not.toHaveBeenCalled();
+  });
   it('creates a manual candidate directly, saves a version and adopts against the exact current ref',async()=>{
     const f=fixture();mount(f);await screen.findByText('Accepted current prose.')
     fireEvent.click(screen.getByRole('button',{name:'直接手改'}));const editor=await screen.findByRole('textbox',{name:'候选正文'})

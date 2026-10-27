@@ -26,7 +26,7 @@
 | `rp_last_step_catalog` | `{}` | 取得当前目录、策略与 revision |
 | `rp_last_step_read` | `{entryIds: [id]}` | 按需读取模块正文 |
 | `rp_last_step_patch` | `{expectedRevision, operations}` | 原子修改本会话覆盖 |
-| `rp_present` | `{factReceiptId}`、`{packet}` 或 `{rewriteOf}`，互斥 | GM 事实回执呈现、旧会话公开包或冻结失败稿 writer 重试 |
+| `rp_present` | `{factReceiptId}`、`{packet}`、`{rewriteOf}` 或 `{regenerateOf}`，互斥 | 事实呈现、旧公开包、冻结失败重试；regenerateOf 仅在匹配的真实 owner 调度作用域内可用 |
 
 补丁操作是 `enable`、`disable`、`replace`、`fill`、`add`、`remove`。来源条目不能删除；remove 仅用于临时新增条目，新增条目只允许呈现阶段且不能冒充来源、必用或锁定条目。策略、阶段、绑定和源版本由 owner API 管理。
 
@@ -89,7 +89,7 @@ rp_last_step_catalog 的 presentations 只列出当前可重试失败记录。rp
 
 GM 绑定会话用 `rp_present({factReceiptId})` 读取可选 `rpGM.presentation` 的已提交事实；开场逐字返回 owner 选择，不调用 writer。普通回合将脱离复制的 `storySnapshot` 与方向包分别冻结，传给可选 Context、组装模型和 writer。旧会话继续使用 packet。
 
-同一个 context 的相同已完成请求先校验本会话事实回执、原 assistant/call 与有效规范正文，再返回已有记录，不重新请求 GM 或 writer；规范接受先于本地 complete 记账时可据原 result 补齐记账。已回退来源拒绝重放，冲突请求不改变原收据。新 context 始终经过 GM 的 latest-unpresented 校验，已正式呈现的事实返回 FACT_ALREADY_PRESENTED，被较新事实取代的未决回执返回 FACT_RECEIPT_SUPERSEDED。成功正文替代表达使用草稿接口。
+同一个 context 的相同已完成请求先校验本会话事实回执、原 assistant/call 与有效规范正文，再返回已有记录，不重新请求 GM 或 writer；规范接受先于本地 complete 记账时可据原 result 补齐记账。已回退来源拒绝重放，冲突请求不改变原收据。普通 factReceipt 新 context 经过 GM 的 latest-unpresented 校验，已正式呈现的事实返回 FACT_ALREADY_PRESENTED，被较新事实取代的未决回执返回 FACT_RECEIPT_SUPERSEDED。成功正文可以使用草稿接口显式采用候选，或用 0.4 的独立追加重生模式。
 
 `rpLastStep.narratives({sessionId,agent?,signal?})` 按有效 surface 和完整 call/result 来源链返回 NarrativeRecord。ref 包含 sessionId、presentationId、assistantMessageId、callSeq、baseResultSeq、resultSeq，修订键为 `JSON.stringify([presentationId,resultSeq])`。实际正文读取有效 message.content；原 meta.text 只标识原始执行档案。公开 receipt、规范 meta.rpLastStep.record 和 NarrativeRecord 保留可选 factReceiptId，指向同一个稳定事实回执；旧 packet 会话可不含该字段。压缩保留原来源，回退替换排除失效分支。
 
@@ -100,6 +100,24 @@ owner `createDraft/editDraft/drafts` 保存独立候选，写作复用已冻结 
 作者注结果通知以 compiled writer snapshot 冻结为界：组装前失败释放 claim；writer 失败保留原 claim，成功重试提交实际 presentationId 和原 claimId。只有规范接受才消费，重复通知幂等。
 
 plugin-only `ensureBuiltinProfile({key,profile:{name,entries}})` 建立 immutable ready 默认版本；冲突拒绝，后续 owner 编辑另存新版本。`contentRevision/exportContent/importContent` 提供内容包接缝；导入分配新 ID、保留原文与策略、强制 draft，并按 requestId 幂等。
+
+## 0.4 owner 接口、规范接受与有效选择
+
+服务增加 `capabilities.narrativeRevisions=1`，既有签名保持兼容：
+
+```text
+presentFact({sessionId,factReceiptId,operationId,signal?}) -> {status,presentationId?,errorCode?}
+regenerateProse({sessionId,basedOn:NarrativeRef,operationId,instruction?,signal?}) -> {status,presentationId?,errorCode?}
+storyHistory({sessionId,agent?,signal?}) -> {schemaVersion:1,records,folded,projectionKey}
+```
+
+`narratives({sessionId,agent?,signal?})` 保留真实规范接受记录与来源链，供审计、作者注消费和恢复证明使用。`storyHistory.records` 从这些记录选择 Database 当前事实回执对应的最新成功正文；被替代版本进入 folded，新事实未呈现时没有该版本正文。Context／阅读稿使用有效选择，不将审计正文当当前材料。新修订故事需要真实 Database `factReview=1`，缺少必要投影时报 EFFECTIVE_HISTORY_UNAVAILABLE；纯 legacy packet 路径保留。
+
+presentFact 只派发当前精确回执，合格冻结失败复用 rewriteOf；旧事实版本的失败重试拒绝 FACT_VERSION_SUPERSEDED。regenerateProse 核验最新有效 NarrativeRef、当前事实与完整 composition，捕获当前 render 路由后只重跑 writer，实际 rp_present 结果追加保留，旧事件字节不替换。旧 adoptDraft 的明确 surface replacement 不用于此模式。
+
+服务端绑定的 `ownerOperation={schemaVersion:1,kind,operationId,requestHash}` 保存在 receipt 和真实 canonical metadata；完成重放要求二者与命令来源一致，单独 status 不表示成功。新 operation 对已呈现的事实仍返回 FACT_ALREADY_PRESENTED，不自动转成正文重生。HTTP `/api/rp-last-step/request` 提供静态 presentFact、regenerateProse、storyHistory 动作，不接收 browser/model source 覆盖。
+
+原生 owner 调度可能另有受限 main 请求，必须与 writer 分别计数。正文阶段不重做事实、Context 或组装，不代表整个 owner 操作全模型零调用。GM 的 resumeFactDecision／resumeFactGeneration 仅结算且全模型零调用；写作由独立 resumeFactPresentation 开始。当前源码审查与待验收范围见[验收记录](acceptance.md)。
 
 ## 原生 owner 操作与统一列表
 

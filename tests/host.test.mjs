@@ -3,7 +3,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import {createHash} from 'node:crypto';
 import { createPresetStore } from '../src/store.mjs';
+import {createReceiptStore} from '../src/receipts.mjs';
 import {PresetError} from '../src/core.mjs';
 import * as module from '../src/host.mjs';
 import {baseEvents,replacement} from './fixtures/narrative-events.mjs';
@@ -164,6 +166,291 @@ async function bind(f, profile = ready()) {
   const saved = await f.host.saveProfile({ profile, expectedRevision: (await f.store.snapshot()).revision });
   await f.host.bindSession({ sessionId: 'story', profileId: saved.profileId, version: saved.version, expectedRevision: saved.revision });
 }
+
+async function revisionFixture(t,{legacy=false,stages,projection:providedProjection}={}){
+  const commands=new Map(),counts={gm:0,prepare:0,main:0},guards=new Set(),events=[];
+  let activeReceiptId='fact-1',factRevision=1,pendingCandidateId=null,dispatchArgs,accept=true,work=Promise.resolve(),turn=0;
+  const projection=()=>providedProjection??{schemaVersion:1,latestRoundId:'round',groups:[{roundId:'round',source:{sessionId:'story'},activeReceiptId,factRevision,pendingCandidateId}]};
+  const services={commands:{register(def){commands.set(def.name,def);return()=>commands.delete(def.name);}},...legacy?{}:{rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>projection()}},rpGM:{binding:async()=>legacy?null:{id:'gm'},storyState:async()=>({lastFactReceipt:{id:activeReceiptId}}),presentation:async({factReceiptId})=>{counts.gm++;if(factReceiptId!==activeReceiptId)throw new PresetError('FACT_VERSION_SUPERSEDED','Old facts',409);return{factReceipt:{id:factReceiptId,kind:'turn',...legacy?{}:{factRoundId:'round',factRevision}},packet,story:{title:'Gate'}};}},rpContext:{prepare:async()=>{counts.prepare++;return{id:'frozen',authorNote:{id:'note',version:1,claimId:'claim'},materials:{entries:[],history:[],recentProse:[],guidance:'Frozen context'}};}}};
+  const f=await fixture(t,{services,stages:stages??[{commit:true},'Original prose.','New prose.']}),agent=f.agents.get('story');await bind(f);
+  agent.status='idle';agent.session.header={id:'story'};agent.session.snapshotEvents=()=>structuredClone(events);agent.session.deriveMessages=()=>events.filter(event=>event.type==='assistant/message').map(event=>event.data.message);
+  const append=(type,data,intent={})=>{const event={seq:events.length,type,data:structuredClone(data),...intent};events.push(event);f.ctx.emit('session/event',agent.session,event);return event;};agent.session.append=append;
+  agent.ctx.tools.guard=guard=>{guards.add(guard);return()=>guards.delete(guard);};
+  async function canonical(args,currentTurn){
+    const callId='call-'+events.length,assistant='assistant-'+events.length;
+    append('assistant/message',{turn:currentTurn,step:1,message:{id:assistant,role:'assistant',source:{kind:'model'},content:[{type:'tool-call',id:callId,name:'rp_present',arguments:JSON.stringify(args)}]}},{surfaceOp:'append'});
+    const call=append('tool/call',{turn:currentTurn,step:1,name:'rp_present',callId,arguments:JSON.stringify(args)}),tool=f.ctxTools.get('rp_present');
+    const exec={agent,name:'rp_present',arguments:args,callId,rootCallId:callId,signal:new AbortController().signal,concludeTurn(){}};
+    for(const guard of guards){const denied=guard(exec);if(denied)throw new PresetError('TOOL_DENIED',denied,409);}
+    let result;try{result=await tool.execute(args,exec);}catch(error){append('tool/result',{turn:currentTurn,step:1,message:{id:'failure-'+callId,role:'tool',source:{kind:'tool',callId},toolCallId:callId,isError:true,content:[{type:'text',text:error.code??'Failed'}]}},{surfaceOp:'append',sourceEventSeqs:[call.seq]});await f.ctx.flush();throw error;}
+    if(accept)append('tool/result',{turn:currentTurn,step:1,message:{id:'result-'+callId,role:'tool',source:{kind:'tool',callId},toolCallId:callId,isError:false,content:tool.output.render(args,result)},meta:tool.output.presentationMeta(args,result)},{surfaceOp:'append',sourceEventSeqs:[call.seq]});
+    await f.ctx.flush();return result;
+  }
+  const next=async proposal=>{const handlers=[...f.ctx.listeners.get('agent/pre-step')??[]];const step=index=>handlers[index]?handlers[index](proposal,()=>step(index+1)):Promise.resolve({kind:'enter',messages:proposal.messages});return step(0);};
+  agent.followup=message=>{agent.status='running';work=Promise.resolve().then(async()=>{turn++;append('turn/start',{turn});const decision=await next({agent,turn,step:1,messages:[message],signal:new AbortController().signal});if(decision.kind==='enter'){for(const admitted of decision.messages)append('user/message',admitted,{surfaceOp:'append'});counts.main++;const instruction=message.content[0].text;const args=dispatchArgs??JSON.parse(instruction.match(/rp_present\((\{.*\})\)/u)[1]);await canonical(args,turn).catch(()=>{});}append('turn/end',{turn,reason:{kind:'completed'}});await f.ctx.flush();}).finally(()=>{agent.status='idle';});};agent.whenIdle=()=>work;agent.cancel=()=>{};
+  f.ctx.typertGateway.invoke=async request=>{const [,name,args]=/^\/([^ ]+)\s+(.*)$/u.exec(request.args.line),commandId='command-'+events.length;append('command/run',{commandId,name,args,source:{kind:'user'}});const result=await commands.get(name).handler({agent,rawInput:args,commandId,signal:request.signal});append('command/done',{commandId,result});return{commandId,result};};
+  return{...f,agent,events,counts,guards,canonical:async args=>{turn++;append('turn/start',{turn});const result=await canonical(args,turn);append('turn/end',{turn,reason:{kind:'completed'}});await f.ctx.flush();return result;},setFact:(id,revision)=>{activeReceiptId=id;factRevision=revision;},pending:id=>{pendingCandidateId=id;},setDispatchArgs:value=>{dispatchArgs=value;},setAccept:value=>{accept=value;}};
+}
+
+test('owner prose regeneration accepts a new canonical result, preserves old bytes and replays before stale ref checks',async t=>{
+  const f=await revisionFixture(t),first=await f.canonical({factReceiptId:'fact-1'}),before=structuredClone(f.events),ref=(await f.host.narratives({sessionId:'story'})).records[0].ref;
+  assert.equal(typeof f.host.regenerateProse,'function');
+  const request={sessionId:'story',basedOn:ref,operationId:'owner-prose-1',instruction:'Shorter.'},result=await f.host.regenerateProse(request);
+  assert.equal(result.status,'complete');assert.notEqual(result.presentationId,first.id);assert.deepEqual(f.events.slice(0,before.length),before);
+  assert.deepEqual(f.counts,{gm:1,prepare:1,main:1});assert.equal(f.calls.length,3);assert.equal(JSON.parse(f.calls.at(-1).request.messages[0].content[0].text).instruction,'Shorter.');
+  assert.equal((await f.host.storyHistory({sessionId:'story'})).records[0].text,'New prose.');assert.equal((await f.host.narratives({sessionId:'story'})).records.length,2);
+  const material=await f.host.material({sessionId:'story',presentationId:result.presentationId}),normalized={basedOn:{assistantMessageId:ref.assistantMessageId,baseResultSeq:ref.baseResultSeq,callSeq:ref.callSeq,presentationId:ref.presentationId,resultSeq:ref.resultSeq,sessionId:'story'},instruction:'Shorter.',kind:'regenerate-prose',schemaVersion:1,sessionId:'story'},requestHash=createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+  assert.deepEqual(material.ownerOperation,{schemaVersion:1,kind:'regenerate-prose',operationId:'owner-prose-1',requestHash});
+  const args=f.events.find(event=>event.type==='command/run').data.args.trim().split(/\s+/u);assert.equal(args.length,3);assert.equal(args[0],'owner-prose-1');assert.equal(args[1],requestHash);
+  const size=f.events.length;assert.deepEqual(await f.host.regenerateProse(request),result);assert.equal(f.events.length,size);
+  await assert.rejects(f.host.regenerateProse({...request,instruction:'Changed.'}),{code:'OPERATION_ID_CONFLICT'});
+  await assert.rejects(f.host.regenerateProse({...request,operationId:'new-op'}),{code:'NARRATIVE_CONFLICT'});assert.equal(f.guards.size,0);
+});
+
+test('owner dispatch cannot call wrong tools or IDs and requires genuine canonical acceptance',async t=>{
+  const f=await revisionFixture(t);await f.canonical({factReceiptId:'fact-1'});const ref=(await f.host.narratives({sessionId:'story'})).records[0].ref;
+  f.setDispatchArgs({regenerateOf:'wrong'});const denied=await f.host.regenerateProse({sessionId:'story',basedOn:ref,operationId:'wrong'});assert.equal(denied.status,'failed');assert.equal(f.calls.length,2);assert.equal(f.guards.size,0);
+  await assert.rejects(f.host.present({sessionId:'story',agent:f.agent,contextKey:'outside',regenerateOf:ref.presentationId}),{code:'OWNER_OPERATION_REQUIRED'});
+  f.setDispatchArgs(undefined);f.setAccept(false);const missing=await f.host.regenerateProse({sessionId:'story',basedOn:ref,operationId:'unaccepted'});assert.equal(missing.status,'failed');assert.equal((await f.host.storyHistory({sessionId:'story'})).records[0].text,'Original prose.');assert.equal(f.guards.size,0);
+});
+
+test('completed owner replay requires agreement with the complete actual canonical metadata',async t=>{
+  const f=await revisionFixture(t);await f.canonical({factReceiptId:'fact-1'});const basedOn=(await f.host.narratives({sessionId:'story'})).records[0].ref,request={sessionId:'story',basedOn,operationId:'metadata-proof'};
+  const result=await f.host.regenerateProse(request),event=f.events.find(item=>item.data?.meta?.rpLastStep?.record?.id===result.presentationId);event.data.meta.rpLastStep.record.models.render.model='foreign-writer';
+  await assert.rejects(f.host.regenerateProse(request),{code:'NARRATIVE_CONFLICT'});assert.equal(f.calls.length,3);
+});
+
+test('cancelling owner regeneration aborts its writer and releases the dispatch scope without replacing the old body',async t=>{
+  let entered,release;const started=new Promise(resolve=>{entered=resolve;}),hold=new Promise(resolve=>{release=resolve;});
+  const f=await revisionFixture(t,{stages:[{commit:true},'Original prose.',async()=>{entered();await hold;return'Cancelled new prose.';}]}),first=await f.canonical({factReceiptId:'fact-1'}),basedOn=(await f.host.narratives({sessionId:'story'})).records[0].ref,controller=new AbortController();
+  const pending=f.host.regenerateProse({sessionId:'story',basedOn,operationId:'cancelled',signal:controller.signal});await started;controller.abort();release();
+  assert.equal((await pending).status,'interrupted');await f.agent.whenIdle();assert.equal(f.guards.size,0);assert.equal((await f.host.storyHistory({sessionId:'story'})).records[0].ref.presentationId,first.id);assert.equal((await f.host.narratives({sessionId:'story'})).records.length,1);
+});
+
+test('presentFact uses the selected receipt and same-fact frozen failure; superseded failures cannot retry',async t=>{
+  const f=await revisionFixture(t,{stages:[{commit:true},new Error('writer failed'),'Recovered prose.']});
+  assert.equal(typeof f.host.presentFact,'function');const failed=await f.host.presentFact({sessionId:'story',factReceiptId:'fact-1',operationId:'present-1'});assert.equal(failed.status,'failed');
+  const summaries=(await f.host.presentationSummaries({sessionId:'story'})).presentations;assert.equal(summaries[0].canRetry,true);
+  const recovered=await f.host.presentFact({sessionId:'story',factReceiptId:'fact-1',operationId:'present-2'});assert.equal(recovered.status,'complete');assert.deepEqual(f.counts,{gm:1,prepare:1,main:2});assert.equal(f.calls.length,3);
+  const size=f.events.length;await assert.rejects(f.host.presentFact({sessionId:'story',factReceiptId:'fact-1',operationId:'already'}),{code:'FACT_ALREADY_PRESENTED'});assert.equal(f.events.length,size);
+  f.setFact('fact-2',2);assert.deepEqual((await f.host.storyHistory({sessionId:'story'})).records,[]);
+  assert.equal((await f.host.catalog({sessionId:'story'})).presentations.length,0);
+  await assert.rejects(f.host.retryPresentation({sessionId:'story',presentationId:summaries[0].presentationId}),{code:'FACT_VERSION_SUPERSEDED'});
+  await assert.rejects(f.host.presentFact({sessionId:'story',factReceiptId:'fact-1',operationId:'old'}),{code:'FACT_VERSION_SUPERSEDED'});
+});
+
+test('failed regeneration keeps same-fact old prose and current legacy fact authority is mandatory',async t=>{
+  const f=await revisionFixture(t,{stages:[{commit:true},'Original prose.',new Error('writer failure')]}),first=await f.canonical({factReceiptId:'fact-1'}),basedOn=(await f.host.narratives({sessionId:'story'})).records[0].ref;
+  const failed=await f.host.regenerateProse({sessionId:'story',basedOn,operationId:'failed-regen'});assert.equal(failed.status,'failed');assert.equal((await f.host.storyHistory({sessionId:'story'})).records[0].ref.presentationId,first.id);
+  const summary=(await f.host.presentationSummaries({sessionId:'story'})).presentations.find(item=>item.status==='failed');assert.equal(summary.canRetry,true);
+  f.setFact('fact-2',2);assert.equal((await f.host.presentationSummaries({sessionId:'story'})).presentations.find(item=>item.presentationId===summary.presentationId).retryBlockCode,'FACT_VERSION_SUPERSEDED');assert.equal((await f.host.catalog({sessionId:'story'})).presentations.length,0);
+  const old=await revisionFixture(t,{legacy:true});await old.canonical({factReceiptId:'fact-1'});const ref=(await old.host.narratives({sessionId:'story'})).records[0].ref;delete old.services.rpGM.storyState;
+  await assert.rejects(old.host.regenerateProse({sessionId:'story',basedOn:ref,operationId:'no-authority'}),{code:'EFFECTIVE_HISTORY_UNAVAILABLE'});
+  old.services.rpGM.storyState=async()=>({lastFactReceipt:{id:'different'}});await assert.rejects(old.host.regenerateProse({sessionId:'story',basedOn:ref,operationId:'stale-legacy'}),{code:'FACT_VERSION_SUPERSEDED'});assert.equal(old.calls.length,2);
+});
+
+test('pending fact reviews and missing current authority stop prose operations while pure legacy packets work',async t=>{
+  const f=await revisionFixture(t);await f.canonical({factReceiptId:'fact-1'});const ref=(await f.host.narratives({sessionId:'story'})).records[0].ref;
+  f.pending('candidate');await assert.rejects(f.host.regenerateProse({sessionId:'story',basedOn:ref,operationId:'pending'}),{code:'FACT_REVIEW_PENDING'});
+  f.pending(null);delete f.services.rpDatabase;await assert.rejects(f.host.storyHistory({sessionId:'story'}),{code:'EFFECTIVE_HISTORY_UNAVAILABLE'});
+  const old=await revisionFixture(t,{legacy:true});await old.canonical({packet});const oldRef=(await old.host.narratives({sessionId:'story'})).records[0].ref;assert.equal((await old.host.regenerateProse({sessionId:'story',basedOn:oldRef,operationId:'legacy'})).status,'complete');
+});
+
+test('story history reads pure legacy unbound stories when installed Database projection reports NOT_BOUND',async t=>{
+  const error=Object.assign(new Error('Bind sources to this story first'),{name:'DatabaseError',code:'NOT_BOUND',status:409});
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}}),agent=f.agents.get('story');
+  const empty=await f.host.storyHistory({sessionId:'story'});assert.deepEqual(empty.records,[]);assert.deepEqual(empty.folded,[]);
+  const events=baseEvents(),before=structuredClone(events);agent.session.snapshotEvents=()=>structuredClone(events);
+  const history=await f.host.storyHistory({sessionId:'story'});assert.deepEqual(history.records,(await f.host.narratives({sessionId:'story'})).records);assert.equal(history.records[0].text,'The gate stays shut.');assert.deepEqual(events,before);assert.equal(f.calls.length,0);
+});
+
+test('story history does not hide Database projection authorization, corruption or unknown errors in legacy stories',async t=>{
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{}}}});
+  for(const code of ['FORBIDDEN','gateway/forbidden','STORE_CORRUPT','UNKNOWN_FAILURE']){
+    const error=Object.assign(new Error('Projection cannot be read'),{code,status:code==='FORBIDDEN'?403:500});f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+    await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  }
+  assert.equal(f.calls.length,0);
+});
+
+test('story history still requires projection for accepted fact versions when Database reports NOT_BOUND',async t=>{
+  const f=await revisionFixture(t);await f.canonical({factReceiptId:'fact-1'});const error=Object.assign(new Error('Bind sources to this story first'),{name:'DatabaseError',code:'NOT_BOUND',status:409});
+  f.services.rpGM.binding=async()=>null;f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);assert.equal((await f.host.narratives({sessionId:'story'})).records.length,1);assert.equal(f.calls.length,2);
+});
+
+for(const stage of ['pending','active'])test(`story history preserves a real ${stage} captured group before it has prose`,async t=>{
+  const projection={schemaVersion:1,latestRoundId:'round',groups:[{roundId:'round',source:{sessionId:'story'},activeReceiptId:stage==='active'?'fact-1':null,factRevision:stage==='active'?1:null,pendingCandidateId:stage==='pending'?'candidate':null}]};
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>projection}}}),history=await f.host.storyHistory({sessionId:'story'});
+  assert.deepEqual(history.records,[]);assert.deepEqual(history.folded,[{groupId:'round',factRoundId:'round',activeFactReceiptId:stage==='active'?'fact-1':null,selectedPresentationId:null,pendingFacts:stage==='pending',versions:[]}]);assert.equal(f.calls.length,0);
+});
+
+test('legacy NOT_BOUND history requires exact installed GM absence evidence and preserves binding lookup errors',async t=>{
+  const error=Object.assign(new Error('Bind sources to this story first'),{name:'DatabaseError',code:'NOT_BOUND',status:409});
+  const f=await fixture(t,{services:{rpGM:{},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  for(const binding of [undefined,{}]){f.services.rpGM.binding=async()=>binding;await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);}
+  const denied=Object.assign(new Error('Binding access denied'),{code:'gateway/forbidden'});f.services.rpGM.binding=async()=>{throw denied;};
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===denied);assert.equal(f.calls.length,0);
+});
+
+test('NOT_BOUND history retains standalone packet writer versions without fact links',async t=>{
+  const f=await revisionFixture(t,{legacy:true});await f.canonical({packet});const basedOn=(await f.host.narratives({sessionId:'story'})).records[0].ref;
+  assert.equal((await f.host.regenerateProse({sessionId:'story',basedOn,operationId:'packet-version'})).status,'complete');
+  const before=structuredClone(f.events),calls=f.calls.length;f.services.rpDatabase={capabilities:{factReview:1},factReviewProjection:async()=>{throw Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'});}};
+  const history=await f.host.storyHistory({sessionId:'story'});assert.equal(history.records[0].text,'New prose.');assert.equal(history.records[0].narrativeVersion.kind,'writer-regeneration');
+  delete f.services.rpGM;assert.deepEqual(await f.host.storyHistory({sessionId:'story'}),history);assert.deepEqual(f.events,before);assert.equal(f.calls.length,calls);
+});
+
+test('NOT_BOUND history rejects active fact-linked failures but permits their causally removed audit',async t=>{
+  const f=await revisionFixture(t,{stages:[{commit:true},new Error('writer failed')]});await assert.rejects(f.canonical({factReceiptId:'fact-1'}));
+  const error=Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'});f.services.rpGM.binding=async()=>null;f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);assert.deepEqual((await f.host.narratives({sessionId:'story'})).records,[]);
+  const start=f.events.find(event=>event.type==='assistant/message').seq,end=f.events.find(event=>event.type==='tool/result').seq;
+  f.agent.session.append('user/message',{source:{kind:'runtime-context'},content:[]},{surfaceOp:{op:'replace',startSeq:start,endSeq:end}});
+  assert.deepEqual((await f.host.storyHistory({sessionId:'story'})).records,[]);assert.equal(f.calls.length,2);
+});
+
+test('NOT_BOUND history does not call an active prepared fact receipt legacy before a canonical result exists',async t=>{
+  const error=Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'}),f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}});
+  const events=baseEvents().slice(0,5);f.agents.get('story').session.snapshotEvents=()=>structuredClone(events);
+  const receipts=await createReceiptStore({directory:join(f.directory,'presentations')});await receipts.create({sessionId:'story',contextKey:'["story","assistant","present"]',status:'prepared',factReceiptId:'fact-prepared'});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);assert.equal(f.calls.length,0);
+});
+
+for(const status of ['failed','prepared'])test(`NOT_BOUND child history rejects inherited ${status} fact receipts without changing their original owner or prefix`,async t=>{
+  const f=await revisionFixture(t,{stages:[{commit:true},new Error('writer failed')]}),receiptStore=await createReceiptStore({directory:join(f.directory,'presentations')});
+  let release,pending;
+  if(status==='prepared'){
+    let entered;const started=new Promise(resolve=>{entered=resolve;}),hold=new Promise(resolve=>{release=resolve;});
+    f.services.rpContext.prepare=async()=>{entered();await hold;throw new Error('Preparation stopped after read assertions');};pending=f.canonical({factReceiptId:'fact-1'});await started;
+  }else await assert.rejects(f.canonical({factReceiptId:'fact-1'}));
+  try{
+    const parentEvents=structuredClone(f.events),childEvents=structuredClone(parentEvents),child=f.makeAgent('child');
+    child.session.header={id:'child',parentSession:'story',isSeeded:true};child.session.inheritedEventCount=parentEvents.length;child.session.snapshotEvents=()=>structuredClone(childEvents);f.agents.set('child',child);
+    await f.host.inheritSession({parentSessionId:'story',sessionId:'child'});
+    const original=await receiptStore.list('story'),error=Object.assign(new Error('Bind sources to this story first'),{code:'NOT_BOUND',status:409}),calls=f.calls.length;
+    assert.equal(original[0].status,status);assert.equal(original[0].sessionId,'story');assert.equal(JSON.parse(original[0].contextKey)[0],'story');assert.deepEqual(await receiptStore.list('child'),[]);
+    f.services.rpGM.binding=async()=>null;f.services.rpDatabase.factReviewProjection=async()=>{throw error;};
+    await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+    await assert.rejects(f.host.storyHistory({sessionId:'child'}),cause=>cause===error);
+    assert.equal(f.calls.length,calls);assert.deepEqual(f.events,parentEvents);assert.deepEqual(childEvents,parentEvents);assert.deepEqual(await receiptStore.list('story'),original);assert.deepEqual(await receiptStore.list('child'),[]);
+    const start=childEvents.find(event=>event.type==='assistant/message').seq,end=childEvents.find(event=>event.type==='tool/result')?.seq??start;
+    childEvents.push({seq:childEvents.length,type:'user/message',surfaceOp:{op:'replace',startSeq:start,endSeq:end},data:{source:{kind:'runtime-context'},content:[]}});
+    assert.deepEqual((await f.host.storyHistory({sessionId:'child'})).records,[]);assert.deepEqual(childEvents.slice(0,parentEvents.length),parentEvents);assert.deepEqual(f.events,parentEvents);assert.deepEqual(await receiptStore.list('story'),original);assert.equal(f.calls.length,calls);
+  }finally{release?.();if(pending)await pending.catch(()=>{});}
+});
+
+test('NOT_BOUND child history retains a verified inherited packet failure as legacy',async t=>{
+  const f=await revisionFixture(t,{legacy:true,stages:[{commit:true},new Error('packet writer failed')]});await assert.rejects(f.canonical({packet}));
+  const parentEvents=structuredClone(f.events),child=f.makeAgent('child');child.session.header={id:'child',parentSession:'story',isSeeded:true};child.session.inheritedEventCount=parentEvents.length;child.session.snapshotEvents=()=>structuredClone(parentEvents);f.agents.set('child',child);
+  await f.host.inheritSession({parentSessionId:'story',sessionId:'child'});f.services.rpDatabase={capabilities:{factReview:1},factReviewProjection:async()=>{throw Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'});}};
+  const calls=f.calls.length;assert.deepEqual((await f.host.storyHistory({sessionId:'child'})).records,[]);assert.deepEqual(f.events,parentEvents);assert.equal(f.calls.length,calls);
+});
+
+test('legacy NOT_BOUND history still rejects a malformed successful Database projection',async t=>{
+  const f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>({schemaVersion:1,latestRoundId:null,groups:'invalid'})}}});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),{code:'EFFECTIVE_HISTORY_UNAVAILABLE'});assert.equal(f.calls.length,0);
+});
+
+for(const toolName of ['rp_commit_turn','rp_propose_turn'])test(`NOT_BOUND history honors active canonical ${toolName} sources through compaction and causal removal`,async t=>{
+  const error=Object.assign(new Error('Bind sources'),{code:'NOT_BOUND'}),f=await fixture(t,{services:{rpGM:{binding:async()=>null},rpDatabase:{capabilities:{factReview:1},factReviewProjection:async()=>{throw error;}}}}),events=baseEvents();
+  events[3].data.message.content[0].name=toolName;events[4].data.name=toolName;delete events[5].data.meta;
+  f.agents.get('story').session.snapshotEvents=()=>structuredClone(events);
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  events.push({seq:7,type:'user/message',surfaceOp:{op:'replace',startSeq:2,endSeq:5},sourceEventSeqs:[2,3,4,5],data:{source:{kind:'compact-checkpoint'}}});
+  await assert.rejects(f.host.storyHistory({sessionId:'story'}),cause=>cause===error);
+  events.push({seq:8,type:'user/message',surfaceOp:{op:'replace',startSeq:7,endSeq:7},data:{source:{kind:'runtime-context'}}});
+  assert.deepEqual((await f.host.storyHistory({sessionId:'story'})).records,[]);assert.equal(f.calls.length,0);
+});
+
+test('revision transfer validates optional metadata and canonical source agreement without copying Database truth',async t=>{
+  const source=await revisionFixture(t);await source.canonical({factReceiptId:'fact-1'});const basedOn=(await source.host.narratives({sessionId:'story'})).records[0].ref;
+  const request={sessionId:'story',basedOn,operationId:'saved-regeneration'},result=await source.host.regenerateProse(request),state=await source.host.exportState({sessionIds:['story']});
+  const destination=await revisionFixture(t);destination.events.push(...structuredClone(source.events));
+  const forged=structuredClone(state),receipt=forged.payload.receipts.find(item=>item.id===result.presentationId);receipt.narrativeVersion.factRevision='current';
+  assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:forged})).supported,false);
+  const changed=structuredClone(state);changed.payload.receipts.find(item=>item.id===result.presentationId).narrativeVersion.factRevision=2;
+  await assert.rejects(destination.host.restoreState({sessionIds:['story'],state:changed,restoreId:'forged-version',expectedRevision:(await destination.host.contentRevision()).revision}),{code:'RESTORE_PAYLOAD_INVALID'});
+  await destination.host.restoreState({sessionIds:['story'],state,restoreId:'revision-transfer',expectedRevision:(await destination.host.contentRevision()).revision});
+  assert.equal(destination.calls.length,0);assert.equal((await destination.host.storyHistory({sessionId:'story'})).records[0].ref.presentationId,result.presentationId);
+  assert.deepEqual(await destination.host.regenerateProse(request),result);assert.equal(destination.calls.length,0);
+  const missing=await revisionFixture(t,{legacy:true});missing.events.push(...structuredClone(source.events));
+  assert.equal((await missing.host.preflightRestore({sessionIds:['story'],state})).supported,false);
+});
+
+for(const later of ['captured','legacy'])test(`failed retry is superseded before dispatch after a later ${later} fact becomes current`,async t=>{
+  const projection={schemaVersion:1,latestRoundId:'round',groups:[{roundId:'round',source:{sessionId:'story'},activeReceiptId:'fact-1',factRevision:1,pendingCandidateId:null}]};
+  const f=await revisionFixture(t,{projection,stages:[{commit:true},new Error('writer failed'),'Late old-fact prose.']});
+  await assert.rejects(f.canonical({factReceiptId:'fact-1'}));const failed=(await f.host.presentationSummaries({sessionId:'story'})).presentations[0];assert.equal(failed.canRetry,true);
+  f.setFact('fact-2',1);projection.latestRoundId=later==='captured'?'round-2':null;
+  if(later==='captured')projection.groups.push({roundId:'round-2',source:{sessionId:'story'},activeReceiptId:'fact-2',factRevision:1,pendingCandidateId:null});
+  const summary=(await f.host.presentationSummaries({sessionId:'story'})).presentations.find(item=>item.presentationId===failed.presentationId),state=(await f.host.state('story')).presentations.find(item=>item.id===failed.presentationId),catalog=await f.host.catalog({sessionId:'story'}),eventsBefore=structuredClone(f.events),callsBefore=f.calls.length,mainBefore=f.counts.main;
+  let retryCode,directCode;
+  try{await f.host.retryPresentation({sessionId:'story',presentationId:failed.presentationId});}catch(error){retryCode=error.code;}
+  try{await f.host.present({sessionId:'story',agent:f.agent,contextKey:'stale-native-retry',rewriteOf:failed.presentationId});}catch(error){directCode=error.code;}
+  assert.deepEqual({canRetry:summary.canRetry,blockCode:summary.retryBlockCode,stateCanRetry:state.canRetry,stateBlockCode:state.retryBlockCode,catalogHasFailure:catalog.presentations.some(item=>item.id===failed.presentationId),retryCode,directCode,writerDelta:f.calls.length-callsBefore,mainDelta:f.counts.main-mainBefore},{canRetry:false,blockCode:'FACT_VERSION_SUPERSEDED',stateCanRetry:false,stateBlockCode:'FACT_VERSION_SUPERSEDED',catalogHasFailure:false,retryCode:'FACT_VERSION_SUPERSEDED',directCode:'FACT_VERSION_SUPERSEDED',writerDelta:0,mainDelta:0});
+  assert.deepEqual(f.events,eventsBefore);assert.deepEqual((await f.host.storyHistory({sessionId:'story'})).records,[]);
+});
+
+test('pure legacy packet failed retry remains independent of fact-round qualification',async t=>{
+  const f=await revisionFixture(t,{legacy:true,stages:[{commit:true},new Error('packet writer failed'),'Recovered packet prose.']});await assert.rejects(f.canonical({packet}));
+  const failed=(await f.host.presentationSummaries({sessionId:'story'})).presentations[0];assert.equal(failed.canRetry,true);
+  const result=await f.host.retryPresentation({sessionId:'story',presentationId:failed.presentationId});assert.equal(result.result.kind,'success');assert.equal(f.calls.length,3);assert.deepEqual(f.counts,{gm:0,prepare:1,main:1});
+});
+
+test('regeneration with a persisted owner followup preserves player action through canonical history, replay and transfer',async t=>{
+  const source=await revisionFixture(t);source.agent.session.append('user/message',{id:'player-action',role:'user',source:{kind:'user'},content:[{type:'text',text:'Try the gate'}]},{surfaceOp:'append'});
+  await source.canonical({factReceiptId:'fact-1'});const original=(await source.host.narratives({sessionId:'story'})).records[0];assert.equal(original.action,'Try the gate');
+  const request={sessionId:'story',basedOn:original.ref,operationId:'player-action-proof'},result=await source.host.regenerateProse(request);
+  assert.equal(result.status,'complete');assert.equal(source.events.some(event=>event.type==='user/message'&&event.data.source.kind==='user'&&event.data.content[0].text.includes('rp_present(')),true);
+  const canonical=(await source.host.narratives({sessionId:'story'})).records.at(-1),effective=(await source.host.storyHistory({sessionId:'story'})).records.at(-1),record=source.events.find(event=>event.data?.meta?.rpLastStep?.record.id===result.presentationId).data.meta.rpLastStep.record;
+  assert.deepEqual({canonicalAction:canonical.action,effectiveAction:effective.action,metadataAction:record.playerAction},{canonicalAction:'Try the gate',effectiveAction:'Try the gate',metadataAction:'Try the gate'});
+  const eventCount=source.events.length;assert.deepEqual(await source.host.regenerateProse(request),result);assert.equal(source.events.length,eventCount);
+  const state=await source.host.exportState({sessionIds:['story']}),saved=state.payload.receipts.find(item=>item.id===result.presentationId);assert.equal(saved.playerAction,'Try the gate');
+  const destination=await revisionFixture(t);destination.events.push(...structuredClone(source.events));await destination.host.restoreState({sessionIds:['story'],state,restoreId:'action-transfer',expectedRevision:(await destination.host.contentRevision()).revision});
+  assert.deepEqual(await destination.host.regenerateProse(request),result);assert.equal((await destination.host.storyHistory({sessionId:'story'})).records.at(-1).action,'Try the gate');assert.equal(destination.calls.length,0);
+});
+
+test('owner presentFact preserves frozen player action rather than its persisted management followup',async t=>{
+  const f=await revisionFixture(t),request={sessionId:'story',factReceiptId:'fact-1',operationId:'owner-present-action'},result=await f.host.presentFact(request);assert.equal(result.status,'complete');
+  const canonical=(await f.host.narratives({sessionId:'story'})).records[0],effective=(await f.host.storyHistory({sessionId:'story'})).records[0],record=f.events.find(event=>event.data?.meta?.rpLastStep?.record.id===result.presentationId).data.meta.rpLastStep.record;
+  assert.deepEqual({canonicalAction:canonical.action,effectiveAction:effective.action,metadataAction:record.playerAction},{canonicalAction:'Try the gate',effectiveAction:'Try the gate',metadataAction:'Try the gate'});
+  const count=f.events.length;assert.deepEqual(await f.host.presentFact(request),result);assert.equal(f.events.length,count);
+});
+
+test('transfer rejects a player action that differs from frozen input or actual canonical metadata',async t=>{
+  const source=await revisionFixture(t),result=await source.host.presentFact({sessionId:'story',factReceiptId:'fact-1',operationId:'action-transfer-proof'}),state=await source.host.exportState({sessionIds:['story']}),destination=await revisionFixture(t);
+  destination.events.push(...structuredClone(source.events));
+  const badAction=structuredClone(state);badAction.payload.receipts.find(item=>item.id===result.presentationId).playerAction='Owner management text';
+  assert.equal((await destination.host.preflightRestore({sessionIds:['story'],state:badAction})).supported,false);
+  const event=destination.events.find(item=>item.data?.meta?.rpLastStep?.record.id===result.presentationId);event.data.meta.rpLastStep.record.playerAction='Owner management text';
+  await assert.rejects(destination.host.restoreState({sessionIds:['story'],state,restoreId:'wrong-canonical-action',expectedRevision:(await destination.host.contentRevision()).revision}),{code:'RESTORE_PAYLOAD_INVALID'});
+});
+
+test('restore rejects omitted protected public revision metadata before intact zero-model replay',async t=>{
+  const source=await revisionFixture(t);source.agent.session.append('user/message',{id:'player-action',role:'user',source:{kind:'user'},content:[{type:'text',text:'Try the gate'}]},{surfaceOp:'append'});
+  await source.canonical({factReceiptId:'fact-1'});const basedOn=(await source.host.narratives({sessionId:'story'})).records[0].ref,request={sessionId:'story',basedOn,operationId:'omission-transfer-proof'},result=await source.host.regenerateProse(request),state=await source.host.exportState({sessionIds:['story']}),destination=await revisionFixture(t);
+  destination.events.push(...structuredClone(source.events));const revision=(await destination.host.contentRevision()).revision,events=structuredClone(destination.events);
+  for(const field of ['playerAction','factReceiptId','regenerateOf','narrativeVersion','ownerOperation']){
+    const omitted=structuredClone(state),receipt=omitted.payload.receipts.find(item=>item.id===result.presentationId);assert.equal(Object.hasOwn(receipt,field),true);delete receipt[field];
+    await assert.rejects(destination.host.restoreState({sessionIds:['story'],state:omitted,restoreId:'missing-'+field,expectedRevision:revision}),{code:'RESTORE_PAYLOAD_INVALID'},field);
+    assert.equal((await destination.host.contentRevision()).revision,revision);assert.equal(destination.calls.length,0);assert.deepEqual(destination.events,events);
+  }
+  await destination.host.restoreState({sessionIds:['story'],state,restoreId:'intact-after-omissions',expectedRevision:revision});assert.deepEqual(await destination.host.regenerateProse(request),result);assert.equal(destination.calls.length,0);
+  assert.equal((await destination.host.storyHistory({sessionId:'story'})).records.at(-1).action,'Try the gate');assert.equal((await destination.host.exportState({sessionIds:['story']})).payload.receipts.find(item=>item.id===result.presentationId).playerAction,'Try the gate');
+});
+
+test('legacy rewrite transfer preserves its packet-derived public action without a stored action field',async t=>{
+  const source=await revisionFixture(t,{legacy:true,stages:[{commit:true},new Error('legacy writer failed'),'Legacy retry prose.']});await assert.rejects(source.canonical({packet}));
+  const failed=(await source.host.presentationSummaries({sessionId:'story'})).presentations[0];assert.equal((await source.host.retryPresentation({sessionId:'story',presentationId:failed.presentationId})).result.kind,'success');
+  const state=await source.host.exportState({sessionIds:['story']}),saved=state.payload.receipts.find(item=>item.rewriteOf===failed.presentationId),canonical=source.events.find(event=>event.data?.meta?.rpLastStep?.record.id===saved.id).data.meta.rpLastStep.record;
+  assert.equal(Object.hasOwn(saved,'playerAction'),false);assert.equal(canonical.playerAction,'Try the gate');const destination=await revisionFixture(t,{legacy:true});destination.events.push(...structuredClone(source.events));
+  const revision=(await destination.host.contentRevision()).revision,omitted=structuredClone(state);delete omitted.payload.receipts.find(item=>item.id===saved.id).rewriteOf;
+  await assert.rejects(destination.host.restoreState({sessionIds:['story'],state:omitted,restoreId:'missing-legacy-rewrite',expectedRevision:revision}),{code:'RESTORE_PAYLOAD_INVALID'});
+  await destination.host.restoreState({sessionIds:['story'],state,restoreId:'intact-legacy-rewrite',expectedRevision:revision});assert.equal(destination.calls.length,0);assert.equal((await destination.host.narratives({sessionId:'story'})).records[0].action,'Try the gate');
+  assert.equal(Object.hasOwn((await destination.host.exportState({sessionIds:['story']})).payload.receipts.find(item=>item.id===saved.id),'playerAction'),false);
+});
 
 function acceptedEvents(result){
   const events=baseEvents();

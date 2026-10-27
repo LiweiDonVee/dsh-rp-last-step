@@ -2,19 +2,21 @@ import {randomUUID} from 'node:crypto';
 import {PresetError} from './core.mjs';
 import {requireLatestNarrative} from './narratives.mjs';
 
-const commands={adopt:'rp_adopt_draft',retry:'rp_retry_presentation'};
+const commands={adopt:'rp_adopt_draft',retry:'rp_retry_presentation',presentFact:'rp_present_fact',regenerateProse:'rp_regenerate_prose'};
+const revision=kind=>kind==='presentFact'||kind==='regenerateProse';
 const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const safeError=error=>error instanceof PresetError?`${error.code}: ${error.message}`:error?.name==='AbortError'?'正文管理操作已取消。':'正文管理操作未能完成。';
 
 /** Owner commands create real native turns; temporary hooks match one inbox request and turn. */
-export function createOwnerOperations(ctx,{prepare,complete,withDraftVersion=(_input,work)=>work()}){
+export function createOwnerOperations(ctx,{prepare,complete,enterScope=()=>()=>{},replay=()=>null,withDraftVersion=(_input,work)=>work()}){
   const pending=new Map(),queues=new Map(),lifetimes=new Set(),jobs=new Set(),activities=new Set();
   let connected=false,disconnect=()=>{},stopped=false;
-  function capable(agent,kind){return !stopped&&connected&&typeof ctx.typertGateway?.invoke==='function'&&agent?.status==='idle'&&typeof agent.followup==='function'&&typeof agent.whenIdle==='function'&&typeof agent.session?.snapshotEvents==='function'&&typeof agent.session?.append==='function'&&(kind!=='retry'||typeof agent.ctx?.tools?.guard==='function');}
+  function capable(agent,kind){return !stopped&&connected&&typeof ctx.typertGateway?.invoke==='function'&&agent?.status==='idle'&&typeof agent.followup==='function'&&typeof agent.whenIdle==='function'&&typeof agent.session?.snapshotEvents==='function'&&typeof agent.session?.append==='function'&&(kind==='adopt'||typeof agent.ctx?.tools?.guard==='function');}
   async function execute(operation,agent,commandSignal){
     if(!capable(agent,operation.kind))throw new PresetError('OWNER_OPERATION_UNAVAILABLE','This story must be idle with native owner operations available',409);
     const signal=commandSignal?AbortSignal.any([operation.signal,commandSignal]):operation.signal;
-    signal.throwIfAborted();await prepare({kind:operation.kind,request:operation.request,agent,signal});signal.throwIfAborted();
+    signal.throwIfAborted();const initial=await prepare({kind:operation.kind,request:operation.request,agent,signal});signal.throwIfAborted();
+    const toolArgs=operation.kind==='retry'?{rewriteOf:operation.request.presentationId}:initial.toolArgs;
     if(agent.status!=='idle')throw new PresetError('PRESENTATION_BUSY','The story started other work before this operation',409);
     const requestId=randomUUID(),releases=[];
     let turn,step,seq,failure,finished=false,resolveEnd,guarded=false;
@@ -34,7 +36,7 @@ export function createOwnerOperations(ctx,{prepare,complete,withDraftVersion=(_i
       if(proposal.agent!==agent)return next();
       if(turn!==undefined){
         if(proposal.turn!==turn)return next();
-        if(operation.kind==='retry'&&proposal.step!==step)return{kind:'reject'};
+        if(operation.kind!=='adopt'&&proposal.step!==step)return{kind:'reject'};
         return next();
       }
       const mine=proposal.messages?.some(message=>message.id===requestId);
@@ -58,12 +60,16 @@ export function createOwnerOperations(ctx,{prepare,complete,withDraftVersion=(_i
           });
           return{kind:'reject'};
         }
+        if(revision(operation.kind)){
+          if(JSON.stringify(prepared.toolArgs)!==JSON.stringify(toolArgs))return reject(new PresetError('OWNER_REQUEST_CONFLICT','The selected presentation mode changed before dispatch',409));
+          releases.push(enterScope({kind:operation.kind,request:operation.request,agent,turn,prepared,requestId,signal}));
+        }
         releases.push(agent.ctx.tools.guard(exec=>{
           if(exec.agent!==agent)return undefined;
           const currentTurn=agent.session.snapshotEvents().findLast(event=>event.type==='turn/start')?.data.turn;
           if(currentTurn!==turn)return undefined;
           const args=exec.arguments;
-          return exec.name==='rp_present'&&exec.parent===undefined&&exec.rootCallId===exec.callId&&object(args)&&Object.keys(args).length===1&&args.rewriteOf===operation.request.presentationId?undefined:'Only rp_present with the selected failed presentation rewriteOf is permitted for this retry request';
+          return exec.name==='rp_present'&&exec.parent===undefined&&exec.rootCallId===exec.callId&&object(args)&&Object.keys(args).length===1&&Object.keys(toolArgs).every(key=>args[key]===toolArgs[key])?undefined:'Only the exact selected rp_present operation is permitted for this owner request';
         }));guarded=true;
         const decision=await next();
         if(decision.kind==='enter'&&!decision.messages.some(message=>message.id===requestId))return reject(new PresetError('OWNER_REQUEST_CONFLICT','The retry request identity changed before dispatch',409));
@@ -71,7 +77,7 @@ export function createOwnerOperations(ctx,{prepare,complete,withDraftVersion=(_i
       }catch(error){return reject(error);}
     }));
     try{
-      agent.followup({id:requestId,role:'user',source:{kind:'user'},content:[{type:'text',text:operation.kind==='adopt'?'采用上一轮正文的表达候选，不改变任何事实，也不推进剧情。':`仅重试已冻结正文：单独调用 rp_present({"rewriteOf":${JSON.stringify(operation.request.presentationId)}})。不提交 packet/factReceiptId，不运行事实或其他工具。`}]});
+      agent.followup({id:requestId,role:'user',source:{kind:'user'},content:[{type:'text',text:operation.kind==='adopt'?'采用上一轮正文的表达候选，不改变任何事实，也不推进剧情。':`仅执行本次 owner 正文请求：单独调用 rp_present(${JSON.stringify(toolArgs)})。不运行事实、其他工具或其他正文模式；写作指导由 owner 请求独立捕获。`}]});
       await Promise.race([end,agent.whenIdle()]);
       if(failure)throw failure;signal.throwIfAborted();
       if(turn===undefined)throw new PresetError('OWNER_REQUEST_CONFLICT','The specific owner request was not admitted; story text is unchanged',409);
@@ -88,10 +94,15 @@ export function createOwnerOperations(ctx,{prepare,complete,withDraftVersion=(_i
     capable,
     connect(registry){
       disconnect();const releases=[];connected=true;
-      for(const [kind,name] of Object.entries(commands))releases.push(registry.register({name,description:kind==='adopt'?'采用 owner 正文候选':'仅重试所选冻结失败正文',input:{hint:'<owner operation>'},recordInput:false,handler:async invocation=>{
-        const token=invocation.rawInput.trim(),operation=pending.get(token);
+      for(const [kind,name] of Object.entries(commands))releases.push(registry.register({name,description:kind==='adopt'?'采用 owner 正文候选':'执行 owner 正文请求',input:{hint:'<owner operation>'},recordInput:revision(kind),handler:async invocation=>{
+        const parts=invocation.rawInput.trim().split(/\s+/u),token=revision(kind)?parts[2]:invocation.rawInput.trim(),operation=pending.get(token);
         if(!operation||operation.claimed||operation.kind!==kind||operation.sessionId!==invocation.agent.id)return{kind:'error',text:'The owner operation is no longer available for this story'};
         operation.claimed=true;
+        if(revision(kind)){
+          if(parts.length!==3||parts[0]!==operation.request.operationId||parts[1]!==operation.request.ownerOperation.requestHash)return{kind:'error',text:'The exact owner request identity is unavailable'};
+          const runs=invocation.agent.session.snapshotEvents().filter(event=>event.type==='command/run'&&event.data?.commandId===invocation.commandId&&event.data.name===name&&event.data.source?.kind==='user'&&event.data.args?.trim().split(/\s+/u).join(' ')===parts.join(' '));
+          if(typeof invocation.commandId!=='string'||runs.length!==1)return{kind:'error',text:'The exact public owner command source is unavailable'};
+        }
         const activity=execute(operation,invocation.agent,invocation.signal);activities.add(activity);
         try{return await activity;}catch(error){operation.error=error;return{kind:'error',text:safeError(error)};}finally{activities.delete(activity);}
       }}));
@@ -101,9 +112,11 @@ export function createOwnerOperations(ctx,{prepare,complete,withDraftVersion=(_i
       const captured=structuredClone({kind:input.kind,sessionId:input.sessionId,request:input.request}),lifetime=new AbortController(),signal=input.signal?AbortSignal.any([input.signal,lifetime.signal]):lifetime.signal;
       lifetimes.add(lifetime);
       const job=(queues.get(captured.sessionId)??Promise.resolve()).then(async()=>{
+        const previous=revision(captured.kind)?await replay(captured):null;if(previous)return{replay:previous};
         signal.throwIfAborted();if(!capable(ctx.agents.get(captured.sessionId),captured.kind))throw new PresetError('OWNER_OPERATION_UNAVAILABLE','This idle native story cannot dispatch the requested operation',409);
         const token=randomUUID(),operation={...captured,signal,claimed:false};pending.set(token,operation);
-        try{const dispatch=await ctx.typertGateway.invoke({namespace:'commands',method:'execute',args:{agentId:captured.sessionId,line:`/${commands[captured.kind]} ${token}`,submittedAttachments:[]},peer:ctx.connection.browserPeer,signal});if(captured.kind==='adopt'&&operation.error)throw operation.error instanceof PresetError||operation.error?.name==='AbortError'?operation.error:new PresetError('ADOPTION_REJECTED','The candidate could not be adopted',409);return dispatch;}
+        const args=revision(captured.kind)?`${captured.request.operationId} ${captured.request.ownerOperation.requestHash} ${token}`:token;
+        try{const dispatch=await ctx.typertGateway.invoke({namespace:'commands',method:'execute',args:{agentId:captured.sessionId,line:`/${commands[captured.kind]} ${args}`,submittedAttachments:[]},peer:ctx.connection.browserPeer,signal});if((captured.kind==='adopt'||revision(captured.kind))&&operation.error)throw operation.error instanceof PresetError||operation.error?.name==='AbortError'?operation.error:new PresetError('PRESENTATION_FAILED','The owner presentation could not be completed',409);return dispatch;}
         finally{pending.delete(token);}
       });
       const settled=job.then(()=>undefined,()=>undefined);queues.set(captured.sessionId,settled);jobs.add(settled);

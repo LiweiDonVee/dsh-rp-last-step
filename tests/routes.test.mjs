@@ -68,6 +68,16 @@ test('presentation summary route forwards only an authorized session identifier'
   assert.equal((await routes.request(request({action:'presentationSummaries',sessionId:'story',agent:{}}))).status,400);assert.equal(calls.length,1);
 });
 
+test('revision routes accept only static owner DTOs and reject source, model and composition injection',async()=>{
+  const calls=[],basedOn={sessionId:'story',presentationId:'receipt',assistantMessageId:'assistant',callSeq:4,baseResultSeq:5,resultSeq:5};
+  const routes=module.createRpLastStepRoutes(Object.fromEntries(['storyHistory','presentFact','regenerateProse'].map(action=>[action,async input=>{calls.push({action,input});return{ok:true};}])));
+  const requests=[{action:'storyHistory',sessionId:'story'},{action:'presentFact',sessionId:'story',factReceiptId:'fact',operationId:'present'},{action:'regenerateProse',sessionId:'story',basedOn,operationId:'regenerate',instruction:'Shorter.'}];
+  for(const body of requests)assert.equal((await routes.request(request(body))).status,200);
+  for(const body of requests)for(const extra of [{source:{runSeq:1}},{agent:{}},{baseModel:{model:'override'}},{material:{}}])assert.equal((await routes.request(request({...body,...extra}))).status,400);
+  for(const body of [{...requests[1],operationId:undefined},{...requests[2],basedOn:{...basedOn,resultSeq:undefined}},{...requests[2],instruction:{}},{...requests[2],basedOn:{...basedOn,sessionId:'other'}}])assert.equal((await routes.request(request(body))).status,400);
+  assert.equal(calls.length,3);
+});
+
 test('rejects unknown actions, extra fields and malformed required arguments before dispatch', async () => {
   const f = fixture();
   const routes = module.createRpLastStepRoutes(f.service);

@@ -39,6 +39,23 @@ async function fixture(t, { entries = [entry('style', 'Use vivid prose.')], step
 }
 const present = (presenter, extra = {}) => presenter.present({ sessionId: 'story', contextKey: 'turn-1', packet, baseModel, ...extra });
 
+test('append-only writer regeneration freezes the complete original composition and captures only the current render route',async t=>{
+  let preparations=0,routeReads=0;
+  const context={id:'frozen',historyProjection:{schemaVersion:1,projectionKey:'old-key',selectedPresentationIds:['prior'],activeFactReceiptIds:['fact']},authorNote:{id:'note',version:1,claimId:'claim'},materials:{entries:[],history:[{content:'Exact past.'}],recentProse:['Prior prose.'],guidance:'Owner guidance.'}};
+  const f=await fixture(t,{prepareContext:async()=>{preparations++;return context;},resolveModels:input=>{routeReads++;return input.stage==='render'?{render:{provider:'local',model:'current-writer'}}:configs;},steps:[{commit:true},'Original prose.',request=>{
+    assert.equal(request.stageId,'rp-last-step.render');assert.equal(request.config.model,'current-writer');assert.equal(request.input.instruction,'Shorter.');
+    assert.equal(request.input.context.history[0].content,'Exact past.');assert.deepEqual(request.input.recentProse,['Prior prose.']);assert.equal(request.input.story.title,'Gate');return'Regenerated prose.';
+  }]});
+  const first=await present(f.presenter,{factReceiptId:'fact-1',factRoundId:'round',factRevision:1,story:{title:'Gate'}});await f.presenter.commit({sessionId:'story',presentationId:first.id,seq:5});
+  const before=await f.receipts.get(first.id);assert.equal(typeof f.presenter.regenerate,'function');
+  const result=await f.presenter.regenerate({sessionId:'story',contextKey:'owner-regeneration',original:before,instruction:'Shorter.',baseModel});
+  assert.notEqual(result.id,first.id);assert.equal(result.status,'rendered');assert.equal(result.text,'Regenerated prose.');assert.equal(preparations,1);assert.equal(routeReads,2);
+  assert.deepEqual(f.calls.map(item=>item.stageId),['rp-last-step.assemble','rp-last-step.render','rp-last-step.render']);
+  assert.deepEqual(await f.receipts.get(first.id),before);
+  assert.deepEqual(result.narrativeVersion,{schemaVersion:1,groupId:'round',kind:'writer-regeneration',basePresentationId:first.id,factRoundId:'round',factRevision:1});
+  const after=await f.receipts.get(result.id);for(const key of ['packet','profile','overlay','compiled','recentProse','contextPreparation','storySnapshot'])assert.deepEqual(after[key],before[key]);
+});
+
 test('direction packets whitelist visible fields and freeze detached facts', () => {
   const source = structuredClone(packet);
   const normalized = normalizeDirectionPacket(source);
