@@ -1,4 +1,4 @@
-import React, {useState} from 'react'
+import React, {useState,useSyncExternalStore} from 'react'
 import {PresetWorkspace,Quill} from './PresetWorkspace.jsx'
 import {createRpLastStepApi} from './api.js'
 import {PresentationWorkspace} from './PresentationWorkspace.jsx'
@@ -27,10 +27,13 @@ function LastStepWorkspace({sessionId,visible}) {
 }
 
 export function apply(ctx) {
+  const subscribe=listener=>ctx.sidebarRightTabs.subscribe(listener)
+  const hasStudio=()=>Boolean(ctx.sidebarRightTabs.get('rp-studio'))
+  function StandaloneEntry(props){const grouped=useSyncExternalStore(subscribe,hasStudio,()=>false);return grouped?null:<OpenButton {...props}/>}
   ctx.effect(()=>{const style=document.createElement('style');style.dataset.rpLastStep='';style.textContent=css;document.head.append(style);return()=>style.remove()},'RP last-step styles')
   function Body({sessionId,useTabInfo}){const {tab}=useTabInfo();return <LastStepWorkspace key={sessionId} sessionId={sessionId} visible={tab.visible}/>}
   ctx.effect(()=>ctx.sidebarRightTabs.register({id:TAB_ID,kind:TAB_KIND,title:()=> 'RP 预设与呈现',guide:[{id:TAB_KIND,order:37,title:()=> 'RP 最后一步',description:()=> '预设迁移、模块权限与最终正文'}]}),'RP last-step tab')
   ctx.effect(()=>ctx.slots.inject('sidebar.right.pane.tab',()=>ctx.slots.register({name:'sidebar.right.pane.tab',key:TAB_ID},Body)),'RP last-step pane')
-  for(const name of ['conversation.session.header.actions','conversation.hero.options'])ctx.effect(()=>ctx.slots.inject(name,()=>ctx.slots.register({name,id:TAB_ID,order:37,inject:()=>({open:()=>ctx.sidebarRight.openTab(TAB_KIND)})},OpenButton)),`RP last-step entry ${name}`)
+  for(const name of ['conversation.session.header.actions','conversation.hero.options'])ctx.effect(()=>ctx.slots.inject(name,()=>ctx.slots.register({name,id:TAB_ID,order:37,inject:()=>({open:()=>ctx.sidebarRight.openTab(TAB_KIND)})},StandaloneEntry)),`RP last-step entry ${name}`)
   ctx.effect(()=>ctx.slots.inject('rp.studio.workspace.actions',()=>ctx.slots.register({name:'rp.studio.workspace.actions',id:TAB_ID,order:37,inject:()=>({open:()=>ctx.sidebarRight.openTab(TAB_KIND),story:true})},OpenButton)),'RP Studio preset contribution')
 }
