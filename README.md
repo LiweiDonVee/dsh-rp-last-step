@@ -2,6 +2,8 @@
 
 让 Agent 在模拟与工具工作完成后，按需组装提示词模块，再由独立模型生成最终正文。支持导入 SillyTavern 提示词预设、自建模块，以及用户掌握的“必用”和“Agent 只读”策略；导入原件保持不变。
 
+**0.4.1 界面更新：** 安装 RP Studio 1.5.0 后，从 **RP ▾ → 写作预设与正文** 打开完整原生页面；会话顶部与空白页的重复入口自动收纳。未安装或卸载 Studio 时恢复独立入口，右侧原生页签始终保留。管理界面的字体和字号随宿主设置变化。
+
 Native DSH plugin for adapting SillyTavern presets, assembling permission-aware prompt modules, and rendering final RP prose from resolved public facts.
 
 [下载安装包](https://github.com/LiweiDonVee/dsh-rp-last-step/releases) · [使用与迁移](docs/usage.md) · [工具与架构](docs/architecture.md) · [开发与验证](docs/development.md) · [更新记录](CHANGELOG.md)
@@ -24,25 +26,25 @@ flowchart TD
 
 ## 安装
 
-当前 0.4.0 需要 **DSH 0.2.1-rc.3** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
+当前 0.4.1 需要 **DSH 0.2.1-rc.3** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
 
-1. 安装包为 `dsh-rp-last-step-0.4.0.tgz`，下载入口为 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases)。
+1. 安装包为 `dsh-rp-last-step-0.4.1.tgz`，下载入口为 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases)。
 2. 完全退出 DSH，包括后台进程。在文件所在目录执行：
 
 ```powershell
-dsh plugin --profile desktop add ./dsh-rp-last-step-0.4.0.tgz
+dsh plugin --profile desktop add ./dsh-rp-last-step-0.4.1.tgz
 ```
 
-3. 重启 DSH，点击会话顶部的 **预设**，或从右侧新增页签导航打开 **RP 最后一步**。
+3. 重启 DSH。安装 RP Studio 1.5.0 时从 **RP ▾ → 写作预设与正文** 打开；单独安装时点击会话顶部的 **预设**，也可从右侧新增页签导航打开 **RP 最后一步**。
 
 Web 模式将 `desktop` 改为 `web`。不需要另开服务、安装 Node/pnpm 或复制 token。Windows 找不到 `dsh` 时，默认安装可使用：
 
 ```powershell
 $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'
-& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.4.0.tgz
+& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.4.1.tgz
 ```
 
-自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。安装包附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.4.0.tgz -Algorithm SHA256` 核对。
+自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。安装包附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.4.1.tgz -Algorithm SHA256` 核对。
 
 ## 从导入到第一轮正文
 
@@ -84,7 +86,7 @@ $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runti
 
 可选安装 [RP Database](https://github.com/LiweiDonVee/dsh-rp-database) 与 [RP Context](https://github.com/LiweiDonVee/dsh-rp-context)。中间 GM 对固定数据库版本的会话覆盖进行检索、候选外搜索、选择排序与允许的编辑，并主动展开或折叠有效历史；最后一步接收冻结材料，writer 不获得数据库写权限。人物知情使用叙事备注，仍由 GM 判断。
 
-事实审批／修订的当前组合为 GM 0.2.0、Database 0.3.0、LastStep 0.4.0；选材可配 Context 0.3.0，模型路由可配 Loop 0.1.0，阅读／存档界面可配 Studio 1.4.0 与 StoryKit 0.2.0。旧 packet、旧事实回执和 0.3 接缝仍按各自兼容能力使用，不将新版本能力假定为所有旧故事的必需依赖。
+事实审批／修订的当前组合为 GM 0.2.1、Database 0.3.1、LastStep 0.4.1；选材可配 Context 0.3.1，模型路由可配 Loop 0.1.1，阅读／存档界面可配 Studio 1.5.0 与 StoryKit 0.2.1。旧 packet、旧事实回执和 0.3 接缝仍按各自兼容能力使用，不将新版本能力假定为所有旧故事的必需依赖。
 
 数据库和历史材料在提示词模块组装前冻结，最近正文同步进入写作输入。关闭或未安装主动上下文时保持原有行为；本插件不替换 DSH 主循环压缩后端。
 
