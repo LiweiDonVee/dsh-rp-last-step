@@ -26,13 +26,13 @@ flowchart TD
 
 ## 安装
 
-当前 0.4.1 需要 **DSH 0.2.1-rc.3** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
+当前 0.4.2 需要 **DSH 0.2.2-rc.1** 或更新的兼容版本。正式呈现需要 **原生工具模式**；纯 PTC 会话可迁移、编辑和预览，不能启用终止呈现。插件不会自动修改工具模式。旧 0.2.0 的 rc.2 验收记录保留作历史证据。
 
-1. 安装包为 `dsh-rp-last-step-0.4.1.tgz`，下载入口为 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases)。
+1. 安装包为 `dsh-rp-last-step-0.4.2.tgz`，下载入口为 [Releases](https://github.com/LiweiDonVee/dsh-rp-last-step/releases)。
 2. 完全退出 DSH，包括后台进程。在文件所在目录执行：
 
 ```powershell
-dsh plugin --profile desktop add ./dsh-rp-last-step-0.4.1.tgz
+dsh plugin --profile desktop add ./dsh-rp-last-step-0.4.2.tgz
 ```
 
 3. 重启 DSH。安装 RP Studio 1.5.0 时从 **RP ▾ → 写作预设与正文** 打开；单独安装时点击会话顶部的 **预设**，也可从右侧新增页签导航打开 **RP 最后一步**。
@@ -41,10 +41,10 @@ Web 模式将 `desktop` 改为 `web`。不需要另开服务、安装 Node/pnpm 
 
 ```powershell
 $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'
-& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.4.1.tgz
+& $dshCli plugin --profile desktop add ./dsh-rp-last-step-0.4.2.tgz
 ```
 
-自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。安装包附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.4.1.tgz -Algorithm SHA256` 核对。
+自定义安装位置请改为对应启动器。升级同样安装新版 tgz 并重启。安装包附 `SHA256SUMS.txt`；使用 `Get-FileHash ./dsh-rp-last-step-0.4.2.tgz -Algorithm SHA256` 核对。
 
 ## 从导入到第一轮正文
 
@@ -86,7 +86,7 @@ $dshCli = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runti
 
 可选安装 [RP Database](https://github.com/LiweiDonVee/dsh-rp-database) 与 [RP Context](https://github.com/LiweiDonVee/dsh-rp-context)。中间 GM 对固定数据库版本的会话覆盖进行检索、候选外搜索、选择排序与允许的编辑，并主动展开或折叠有效历史；最后一步接收冻结材料，writer 不获得数据库写权限。人物知情使用叙事备注，仍由 GM 判断。
 
-事实审批／修订的当前组合为 GM 0.2.1、Database 0.3.1、LastStep 0.4.1；选材可配 Context 0.3.1，模型路由可配 Loop 0.1.1，阅读／存档界面可配 Studio 1.5.0 与 StoryKit 0.2.1。旧 packet、旧事实回执和 0.3 接缝仍按各自兼容能力使用，不将新版本能力假定为所有旧故事的必需依赖。
+事实审批／修订的当前组合为 GM 0.2.2、Database 0.3.2、LastStep 0.4.2；选材可配 Context 0.3.2，模型路由可配 Loop 0.1.1，阅读／存档界面可配 Studio 1.5.0 与 StoryKit 0.2.2。旧 packet、旧事实回执和 0.3 接缝仍按各自兼容能力使用，不将新版本能力假定为所有旧故事的必需依赖。
 
 数据库和历史材料在提示词模块组装前冻结，最近正文同步进入写作输入。关闭或未安装主动上下文时保持原有行为；本插件不替换 DSH 主循环压缩后端。
 
@@ -133,3 +133,14 @@ pnpm package
 产物在 `artifacts/`，迁移 skill 自动进入安装包。`pnpm smoke` 使用官方 DSH 和模拟模型进行隔离验收；三插件联用检查见 [开发文档](docs/development.md)。
 
 MIT 许可证。初始实现源自 [RP Studio 集成版本](https://github.com/LiweiDonVee/dsh-rp-studio/commit/f0c7cbba469b28b730b8b895ed2250c1d235fc77)，本仓库是 RP 最后一步后续开发与发布的主仓库。
+
+
+## DSH 0.2.2 compatibility
+
+This release requires DSH `>=0.2.2-rc.1 <0.3.0-0`; the exact integration target is Desktop `0.2.2-rc.1`. Future versions in that range have not been individually accepted. Install Database/Context `0.3.2`, LastStep `0.4.2`, and GM/StoryKit `0.2.2` together when using story forks or saved-story restoration.
+
+DSH 0.2.2 ordinary forks preserve a verified event prefix without adding a parent to the canonical Session header. The host-only `rpGM.sessionLineage({sessionId, signal})` returns `{sessionId, parentSessionId: string | null, inheritedEventCount}` from GM's existing durable binding and actual Session observations. RP owners derive ancestry from this result; canonical headers and event logs retain their original bytes. Conflicting legacy header parents or changed prefixes are rejected.
+
+Saved-story format remains schema 1. StoryKit derives the host-only restore argument `lineages: [{sessionId, parentSessionId: string | null}]` from existing `pluginState.gm.payload.bindings`, with one row per destination and `null` for roots. Database, Context, and LastStep verify the actual destination Session prefixes before using this mapping. It is not a model tool or a public owner route.
+
+RP tools use step-time conditional registration. One detached model-selection object keys the binding snapshot shared by tool admission and prompt context, including refreshed context. A binding added during a step becomes available on the next step. Native/PTC checks inspect the selected executor description rather than a `run_code` registry lookup.

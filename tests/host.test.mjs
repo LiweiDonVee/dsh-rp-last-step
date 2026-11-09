@@ -64,7 +64,7 @@ async function fixture(t, options = {}) {
   const stages = options.stages ?? [{ commit: true }, 'The gate stays shut.'];
   const agents = new Map();
   const makeAgent = (id, extra = {}) => {
-    const scope = { own: id === 'story' ? ctxTools : new Map(), denials: new Set(), mode: options.toolModes?.[id], ...extra };
+    const scope = { own: id === 'story' ? ctxTools : new Map(), conditions:new Map(), denials: new Set(), mode: options.toolModes?.[id], ...extra };
     const agent = {
       id, options: { provider: 'local', model: 'base', reasoningEffort: 'high' },
       session: { id, header: { id }, inheritedEventCount:0, requestHeader: () => ({ config: { provider: 'local', model: 'main-header', reasoningEffort: 'high', maxTokens: 500 } }),
@@ -72,7 +72,7 @@ async function fixture(t, options = {}) {
         append: () => { throw new Error('Session observers must never append'); },
       },
       ctx: { tools: {
-        register: (tool) => { scope.own.set(tool.name, tool); ctx.emit('tools/change'); return () => { scope.own.delete(tool.name); ctx.emit('tools/change'); }; },
+        register: (tool,options={}) => { scope.conditions.set(tool.name,options.when); scope.own.set(tool.name, tool); ctx.emit('tools/change'); return () => { scope.own.delete(tool.name); ctx.emit('tools/change'); }; },
         restrict: ({ deny }) => { const denied = new Set(deny); scope.denials.add(denied); ctx.emit('tools/change'); return () => { scope.denials.delete(denied); ctx.emit('tools/change'); }; },
       } },
     };
@@ -94,13 +94,15 @@ async function fixture(t, options = {}) {
     if ([...scope?.denials ?? []].some((denied) => denied.has(name))) return undefined;
     return scope?.parent ? visibleTool(name, scope.parent) : globalTools.get(name);
   };
-  const schemas = (agent) => {
+  const conditionFor=(name,agent)=>{const scope=toolScopes.get(agent);return scope?.own.has(name)?scope.conditions.get(name):scope?.parent?conditionFor(name,scope.parent):undefined;};
+  const schemas = (agent,modelSelection={}) => {
     const names = new Set(globalTools.keys());
     for (let current = agent; current; current = toolScopes.get(current)?.parent) for (const name of toolScopes.get(current).own.keys()) names.add(name);
     if (effectiveMode(agent) === 'ptc') names.add('run_code');
-    return [...names].map((name) => visibleTool(name, agent)).filter(Boolean).map(({ name, parameters = {} }) => ({ name, parameters }));
+    return [...names].map((name) => visibleTool(name, agent)).filter(Boolean).filter(tool=>!conditionFor(tool.name,agent)||conditionFor(tool.name,agent)({agent,modelSelection})).map(({ name, parameters = {} }) => ({ name, parameters }));
   };
   ctx.tools = {
+    selectExecutor: agent => ({describe:()=>({schemas:effectiveMode(agent)==='ptc'?[{name:'run_code'}]:[]})}),
     register: (tool) => { globalTools.set(tool.name, tool); ctx.emit('tools/change'); return () => { globalTools.delete(tool.name); ctx.emit('tools/change'); }; },
     get: visibleTool, schemas,
   };
@@ -166,6 +168,15 @@ async function bind(f, profile = ready()) {
   const saved = await f.host.saveProfile({ profile, expectedRevision: (await f.store.snapshot()).revision });
   await f.host.bindSession({ sessionId: 'story', profileId: saved.profileId, version: saved.version, expectedRevision: saved.revision });
 }
+test('owner narrative reads verify explicit lineage without re-entering online GM lookup',async t=>{
+  const f=await fixture(t);let online=0,observed=0;
+  f.services.rpGM={sessionLineage:async()=>{online++;throw Object.assign(new Error('Online GM restore queue would be re-entered'),{code:'ONLINE_LINEAGE_REENTRY'});}};
+  f.services.sessionQuery={observeSession:async id=>{observed++;return{header:{id},events:[],inheritedEventCount:0,[Symbol.dispose](){}};}};
+  const lineages=[{sessionId:'story',parentSessionId:null}];
+  assert.deepEqual(await f.host.narratives({sessionId:'story',lineages}),{records:[]});assert.equal(online,0);assert.equal(observed,1);
+  await assert.rejects(f.host.narratives({sessionId:'story',agent:f.agents.get('story'),lineages}),{code:'OWNER_REQUIRED'});
+  await assert.rejects(f.host.narratives({sessionId:'story'}),{code:'ONLINE_LINEAGE_REENTRY'});assert.equal(online,1);
+});
 
 async function revisionFixture(t,{legacy=false,stages,projection:providedProjection}={}){
   const commands=new Map(),counts={gm:0,prepare:0,main:0},guards=new Set(),events=[];
@@ -965,41 +976,23 @@ test('required agent diagnostics block assembly and preview permits owner draft 
   assert.equal(preview.text, 'Hello Reader');
 });
 
-test('admission refresh keeps schemas and context on one frozen binding until the next assembly', async (t) => {
-  const f = await fixture(t);
-  const agent = f.agents.get('story');
-  agent.status = 'running';
-  const context = { agent, scope: agent, signal: new AbortController().signal };
-  for (const provider of f.toolProviders) provider(context);
-  const filter = [...f.ctx.listeners.get('system-prompt/assemble')][0];
-  const assembly = { sections: [], contexts: [], variables: {}, tools: [{ name: 'lookup' }, ...[...f.ctxTools.keys()].map((name) => ({ name }))] };
-  let release;
-  let entered;
-  const waiting = new Promise((resolve) => { release = resolve; });
-  const reached = new Promise((resolve) => { entered = resolve; });
-  const pending = filter(assembly, context, async () => { entered(); await waiting; return assembly; });
-  await reached;
-  await bind(f, ready([entry('agent', 'BEFORE OWNER EDIT', { phase: 'agent' })]));
-  assert.equal(f.host.isEnabled('story'), false);
-  assert.equal((await f.host.state('story')).binding.profileId, 'preset');
-  release();
-  assert.deepEqual((await pending).tools, [{ name: 'lookup' }]);
-  const refresh = { agent, scope: agent, signal: context.signal };
-  assert.equal(f.contexts.get('rp-last-step-binding').text(refresh), '');
-  assert.equal(f.contexts.get('rp-last-step-agent').text(refresh), '');
-
-  const second = { agent, scope: agent, signal: context.signal };
-  for (const provider of f.toolProviders) provider(second);
-  const nextAssembly = { ...assembly, tools: [{ name: 'lookup' }, ...f.surface(agent).tools] };
-  assert.equal((await filter(nextAssembly, second, async () => nextAssembly)).tools.length, 5);
-  assert.equal(f.host.isEnabled('story'), true);
-  assert.match(f.contexts.get('rp-last-step-agent').text(second), /BEFORE OWNER EDIT/u);
-  await f.host.patch({ sessionId: 'story', expectedRevision: 2, operations: [{ op: 'replace', entryId: 'agent', content: 'AFTER OWNER EDIT' }] });
-  assert.match(f.host.agentContext('story'), /AFTER OWNER EDIT/u);
-  assert.match(f.contexts.get('rp-last-step-agent').text({ agent, scope: agent, signal: context.signal }), /BEFORE OWNER EDIT/u);
-  const third = { agent, scope: agent, signal: context.signal };
-  for (const provider of f.toolProviders) provider(third);
-  assert.match(f.contexts.get('rp-last-step-agent').text(third), /AFTER OWNER EDIT/u);
+test('admission and refreshed context retain a disabled step until the next model selection', async (t) => {
+  const f = await fixture(t),agent=f.agents.get('story');agent.status='running';
+  const selection={},context={agent,scope:agent,modelSelection:selection};
+  assert.equal(f.ctx.tools.schemas(agent,selection).length,0);
+  await bind(f, ready([entry('agent','BEFORE OWNER EDIT',{phase:'agent'})]));
+  for(const provider of f.toolProviders)provider(context);
+  assert.equal(f.host.isEnabled('story'),false);
+  assert.equal(f.ctx.tools.schemas(agent,selection).length,0);
+  assert.equal(f.contexts.get('rp-last-step-agent').text({...context}), '');
+  const next={},second={agent,scope:agent,modelSelection:next};
+  assert.equal(f.ctx.tools.schemas(agent,next).length,4);
+  for(const provider of f.toolProviders)provider(second);
+  assert.equal(f.host.isEnabled('story'),true);
+  assert.match(f.contexts.get('rp-last-step-agent').text(second),/BEFORE OWNER EDIT/u);
+  await f.host.patch({sessionId:'story',expectedRevision:2,operations:[{op:'replace',entryId:'agent',content:'AFTER OWNER EDIT'}]});
+  assert.match(f.contexts.get('rp-last-step-agent').text({...second}),/BEFORE OWNER EDIT/u);
+  assert.match(f.contexts.get('rp-last-step-agent').text({...second,modelSelection:{}}),/AFTER OWNER EDIT/u);
 });
 
 test('terminal presentation remains rendered until an accepted canonical rp_present result commits it', async (t) => {

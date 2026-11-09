@@ -35,8 +35,9 @@ function sourceIn(receipt,snapshot){
   if(!assistant?.data.message.content?.some(block=>block.type==='tool-call'&&block.name==='rp_present'&&block.id===tuple[2]))return false;
   return snapshot.events.some(event=>event.type==='tool/call'&&event.seq>assistant.seq&&event.data?.name==='rp_present'&&event.data.callId===tuple[2]&&event.data.turn===assistant.data.turn&&event.data.step===assistant.data.step);
 }
+const parentOf=snapshot=>snapshot?.parentSession??snapshot?.header.parentSession;
 function descended(snapshot,ancestor,sessions){
-  const seen=new Set();while(snapshot?.header.parentSession){if(seen.has(snapshot.header.id))return false;seen.add(snapshot.header.id);const parent=sessions.get(snapshot.header.parentSession),count=snapshot.inheritedEventCount;if(!parent||!Number.isSafeInteger(count)||count<0||count>parent.events.length||count>snapshot.events.length||!isDeepStrictEqual(snapshot.events.slice(0,count),parent.events.slice(0,count)))return false;if(parent.header.id===ancestor)return true;snapshot=parent;}return false;
+  const seen=new Set();while(parentOf(snapshot)){if(seen.has(snapshot.header.id))return false;seen.add(snapshot.header.id);const parent=sessions.get(parentOf(snapshot)),count=snapshot.inheritedEventCount;if(!parent||!Number.isSafeInteger(count)||count<0||count>parent.events.length||count>snapshot.events.length||!isDeepStrictEqual(snapshot.events.slice(0,count),parent.events.slice(0,count)))return false;if(parent.header.id===ancestor)return true;snapshot=parent;}return false;
 }
 export function selectState(raw,sessionIds,sessions,additionalProfileRefs=[]){
   const receipts=new Map(),profiles=new Map(),sources=new Map(),bindings={},drafts={};

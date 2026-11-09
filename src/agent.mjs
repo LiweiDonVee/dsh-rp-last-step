@@ -2,7 +2,6 @@ import { PresetError } from './core.mjs';
 import { normalizeDirectionPacket } from './presenter.mjs';
 
 export const TOOL_NAMES = Object.freeze(['rp_last_step_catalog', 'rp_last_step_read', 'rp_last_step_patch', 'rp_present']);
-const toolNames = new Set(TOOL_NAMES);
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const string = { type: 'string' };
 const strings = { type: 'array', items: string };
@@ -12,10 +11,9 @@ const jsonOutput = {
   render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
 };
 
-// The public registry exposes the reserved transport only in effective PTC
-// scopes, including modes inherited from a standing preset.
+// The selected executor owns the reserved PTC transport schema.
 export function usesNativeTools(ctx, agent) {
-  return ctx.tools.get('run_code', agent) === undefined;
+  return !ctx.tools.selectExecutor(agent).describe([]).schemas.some((tool) => tool.name === 'run_code');
 }
 
 export function requireNativeTools(ctx, agent) {
@@ -59,7 +57,6 @@ export function registerRpLastStepAgent(ctx, service) {
   let stopped = false;
   let syncing = false;
   const add = (tool) => definitions.push(tool);
-  const bound = (agent) => (service.hasBinding?.(agent.session.id) ?? service.isEnabled(agent.session.id)) && usesNativeTools(ctx, agent);
   const release = (record) => {
     for (const dispose of record.tools.splice(0).reverse()) dispose();
     record.restriction?.(); record.restriction = undefined;
@@ -74,26 +71,52 @@ export function registerRpLastStepAgent(ctx, service) {
       for (const agent of agents) {
         let record = scopes.get(agent);
         if (!record) { record = { tools: [], restriction: undefined }; scopes.set(agent, record); }
-        if (bound(agent)) {
+        if (usesNativeTools(ctx, agent)) {
           record.restriction?.(); record.restriction = undefined;
           if (!record.tools.length) {
-            try { for (const tool of definitions) record.tools.push(agent.ctx.tools.register(tool)); }
+            try { for (const tool of definitions) record.tools.push(agent.ctx.tools.register(tool, {
+              when: (context) => context.agent === agent && object(context.modelSelection)
+                && stepSnapshot(agent, context.modelSelection).enabled,
+            })); }
             catch (error) { release(record); throw error; }
           }
         } else if (record.tools.length) {
           for (const dispose of record.tools.splice(0).reverse()) dispose();
         }
       }
-      // Scoped capabilities are inherited. An unbound descendant must mask a
-      // bound parent's RP tools in both native schemas and the generated SDK.
+      // Every native scope captures a disabled snapshot before a later bind.
+      // PTC descendants still mask inherited native RP capabilities.
       for (const agent of agents) {
         const record = scopes.get(agent);
-        if (bound(agent) || record.restriction) continue;
+        if (usesNativeTools(ctx, agent) || record.restriction) continue;
         const inherited = TOOL_NAMES.filter((name) => ctx.tools.get(name, agent) !== undefined);
         if (inherited.length) record.restriction = agent.ctx.tools.restrict({ deny: inherited });
       }
     } finally { syncing = false; }
   }
+  const snapshots = new WeakMap();
+  const currentAgent = (context) => {
+    const agent = ctx.agents.currentInitiator();
+    return context?.agent && context.agent !== agent ? undefined : agent;
+  };
+  const capture = (agent) => {
+    const id = agent?.session?.id;
+    if (agent && (service.hasBinding?.(id) ?? service.isEnabled(id))) requireNativeTools(ctx, agent);
+    return service.contextSnapshot?.(id) ?? {
+      enabled: service.isEnabled(id), bindingMarker: service.bindingMarker(id), agentContext: service.agentContext(id),
+    };
+  };
+  function stepSnapshot(agent, selection) {
+    const entry = snapshots.get(selection);
+    if (entry?.agent === agent) return entry.value;
+    const value = capture(agent);
+    snapshots.set(selection, { agent, value });
+    return value;
+  }
+  const snapshot = (context) => {
+    const agent = currentAgent(context);
+    return agent && object(context?.modelSelection) ? stepSnapshot(agent, context.modelSelection) : capture(agent);
+  };
   try {
     add({
       name: 'rp_last_step_catalog',
@@ -158,31 +181,12 @@ export function registerRpLastStepAgent(ctx, service) {
     disposers.push(ctx.on('agent/disposed', ({ agent }) => { const record = scopes.get(agent); if (record) { release(record); scopes.delete(agent); } }));
     disposers.push(ctx.on('tools/change', () => sync()));
 
-    const snapshots = new WeakMap();
-    const accepted = new WeakMap();
-    const currentAgent = (context) => {
-      const agent = ctx.agents.currentInitiator();
-      return context?.agent && context.agent !== agent ? undefined : agent;
-    };
-    const capture = (agent) => {
-      const id = agent?.session?.id;
-      if (agent && (service.hasBinding?.(id) ?? service.isEnabled(id))) requireNativeTools(ctx, agent);
-      return service.contextSnapshot?.(id) ?? {
-        enabled: service.isEnabled(id), bindingMarker: service.bindingMarker(id), agentContext: service.agentContext(id),
-      };
-    };
-    const snapshot = (context) => {
-      const agent = currentAgent(context);
-      const entry = accepted.get(context);
-      return (entry?.agent === agent ? entry?.value : undefined) ?? (agent && snapshots.get(agent)) ?? capture(agent);
-    };
-    // Tool providers run before dynamic context providers, and are not rerun by
-    // refreshContext. Keep the accepted request's contexts on the same snapshot.
+    // The host shares one detached model selection across admission, assembly,
+    // and refreshContext. Each step keeps its own immutable binding snapshot.
     disposers.push(ctx.systemPrompt.tools((context) => {
       const agent = currentAgent(context);
-      const value = capture(agent);
-      accepted.set(context, { agent, value });
-      if (agent) { snapshots.set(agent, value); service.admitContext?.(agent, value); }
+      const value = snapshot(context);
+      if (agent) service.admitContext?.(agent, value);
       return { schemas: [] };
     }));
     for (const entry of [
@@ -190,12 +194,6 @@ export function registerRpLastStepAgent(ctx, service) {
       { name: 'rp-last-step-workflow', order: 301, text: (context) => snapshot(context).enabled ? 'Resolve simulation and all tool results before final presentation. Preserve player control and authoritative outcomes. Manage only the bound session overlay through rp_last_step_catalog/read/patch; owner locks and required modules are enforced. Finish with rp_present as the sole direct tool call in a new assistant message, using only public facts and explicit variables. For an explicit prose-only retry, inspect catalog.presentations for canRetry and call rp_present with rewriteOf only; do not rerun settled facts or tools. Wait for success; do not echo the resulting prose.' : '' },
       { name: 'rp-last-step-agent', order: 302, text: (context) => snapshot(context).agentContext },
     ]) disposers.push(ctx.systemPrompt.context({ ...entry, required: true, interpolate: false }));
-
-    disposers.push(ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-      const { enabled } = snapshot(context);
-      const result = await next();
-      return enabled ? result : { ...result, tools: result.tools.filter((tool) => !toolNames.has(tool.name)) };
-    }));
   } catch (error) {
     stopped = true;
     for (const record of scopes.values()) release(record);
