@@ -168,6 +168,15 @@ async function bind(f, profile = ready()) {
   const saved = await f.host.saveProfile({ profile, expectedRevision: (await f.store.snapshot()).revision });
   await f.host.bindSession({ sessionId: 'story', profileId: saved.profileId, version: saved.version, expectedRevision: saved.revision });
 }
+test('owner narrative reads verify explicit lineage without re-entering online GM lookup',async t=>{
+  const f=await fixture(t);let online=0,observed=0;
+  f.services.rpGM={sessionLineage:async()=>{online++;throw Object.assign(new Error('Online GM restore queue would be re-entered'),{code:'ONLINE_LINEAGE_REENTRY'});}};
+  f.services.sessionQuery={observeSession:async id=>{observed++;return{header:{id},events:[],inheritedEventCount:0,[Symbol.dispose](){}};}};
+  const lineages=[{sessionId:'story',parentSessionId:null}];
+  assert.deepEqual(await f.host.narratives({sessionId:'story',lineages}),{records:[]});assert.equal(online,0);assert.equal(observed,1);
+  await assert.rejects(f.host.narratives({sessionId:'story',agent:f.agents.get('story'),lineages}),{code:'OWNER_REQUIRED'});
+  await assert.rejects(f.host.narratives({sessionId:'story'}),{code:'ONLINE_LINEAGE_REENTRY'});assert.equal(online,1);
+});
 
 async function revisionFixture(t,{legacy=false,stages,projection:providedProjection}={}){
   const commands=new Map(),counts={gm:0,prepare:0,main:0},guards=new Set(),events=[];

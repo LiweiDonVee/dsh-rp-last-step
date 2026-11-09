@@ -196,7 +196,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     if(!query?.observeSession)throw new PresetError('NARRATIVE_UNAVAILABLE','The canonical session log is unavailable',503);
     const view=await query.observeSession(id);try{return await withSessionLineage(ctx,{header:copy(view.header),events:copy(view.events),inheritedEventCount:view.inheritedEventCount},signal,lineages);}finally{view[Symbol.dispose]();}
   }
-  async function narrativeEvents(id,agent,signal){return(await canonicalSession(id,agent,signal)).events;}
+  async function narrativeEvents(id,agent,signal,lineages){return(await canonicalSession(id,agent,signal,lineages)).events;}
   async function descendsFrom(child,ancestor,signal){
     const seen=new Set([child.header.id]);
     while(child.parentSession){
@@ -584,7 +584,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
         return {presentationId:receipt.id,packet:copy(receipt.packet),...(receipt.factReceiptId?{factReceiptRef:receipt.factReceiptId}:{}),...receipt.narrativeVersion?{narrativeVersion:copy(receipt.narrativeVersion)}:{},...receipt.ownerOperation?{ownerOperation:copy(receipt.ownerOperation)}:{},...receipt.storySnapshot?{storySnapshot:publicStorySnapshot(receipt.storySnapshot)}:{},contextPreparation:copy(receipt.contextPreparation??null),compiled:copy(receipt.compiled??null),models:copy(receipt.models??{}),status:receipt.status};
       });
     },
-    narratives(input,signal=input.signal){return run(signal,async combined=>({records:readNarratives(input.sessionId,await narrativeEvents(input.sessionId,input.agent,combined))}));},
+    narratives(input,signal=input.signal){return run(signal,async combined=>{if(input.lineages!==undefined&&input.agent)throw new PresetError('OWNER_REQUIRED','Explicit lineage is available only to owner reads',403);return{records:readNarratives(input.sessionId,await narrativeEvents(input.sessionId,input.agent,combined,input.lineages))};});},
     storyHistory(input,signal=input.signal){return run(signal,combined=>effectiveHistory(input.sessionId,input.agent,combined));},
     presentFact(input,signal=input.signal){return ownerPresentation('presentFact',input,signal);},
     regenerateProse(input,signal=input.signal){return ownerPresentation('regenerateProse',input,signal);},
