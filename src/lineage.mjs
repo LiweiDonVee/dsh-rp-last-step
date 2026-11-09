@@ -14,13 +14,13 @@ export async function withSessionLineage(ctx,snapshot,signal,lineages){
     if(legacy!==undefined&&legacy!==parentSessionId)invalid('Explicit lineage conflicts with the canonical legacy parent');
     const query=ctx.get?.('sessionQuery')??ctx.sessionQuery;
     if(typeof query?.observeSession!=='function')invalid('Canonical Session query is required to verify restored lineage');
-    const child=await query.observeSession(sessionId,{projections:'none',signal});
+    const child=await query.observeSession(sessionId,{projectionMode:'none',signal});
     try{
       signal?.throwIfAborted();if(child.header.id!==sessionId)invalid('Canonical Session identity changed');count=child.inheritedEventCount;
       if(!Number.isSafeInteger(count)||count<0||count>child.events.length)invalid('Canonical inherited event count is invalid');
       if(parentSessionId!==null){
         if(parentSessionId===sessionId)invalid('A Session cannot inherit itself');
-        const parent=await query.observeSession(parentSessionId,{projections:'none',signal});
+        const parent=await query.observeSession(parentSessionId,{projectionMode:'none',signal});
         try{signal?.throwIfAborted();if(count<1||count>parent.events.length||!isDeepStrictEqual(child.events.slice(0,count),parent.events.slice(0,count)))invalid('The restored child does not preserve its recorded parent prefix');}
         finally{parent[Symbol.dispose]();}
       }
