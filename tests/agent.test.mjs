@@ -5,6 +5,7 @@ import * as module from '../src/agent.mjs';
 function fixture() {
   const calls = [];
   const tools = new Map();
+  const conditions = new Map();
   const globalTools = new Map();
   const codeTools = new Map();
   const contexts = new Map();
@@ -25,6 +26,7 @@ function fixture() {
   let current;
   const ctx = {
     tools: {
+      selectExecutor: agent => ({describe:()=>({schemas:ptc.has(agent?.session?.id)?[{name:'run_code'}]:[]})}),
       register: (tool) => { globalTools.set(tool.name, tool); return () => globalTools.delete(tool.name); },
       get: (name, agent) => name === 'run_code' && ptc.has(agent?.session?.id) ? { name: 'run_code' } : (agent?.session?.id === 'story' ? tools.get(name) : codeTools.get(name)) ?? globalTools.get(name),
     },
@@ -35,14 +37,14 @@ function fixture() {
     agents: { currentInitiator: () => current },
     on: (name, listener) => { listeners.set(name, listener); return () => listeners.delete(name); },
   };
-  const agent = { id: 'story', ctx: { tools: { register: (tool) => { tools.set(tool.name, tool); return () => tools.delete(tool.name); } } }, session: { id: 'story', deriveMessages: () => [{ id: 'assistant-1', role: 'assistant', content: [{ type: 'tool-call', id: 'call-1', name: 'rp_present', arguments: '{}' }] }] } };
+  const agent = { id: 'story', ctx: { tools: { register: (tool,options) => { conditions.set(tool.name,options.when); tools.set(tool.name, tool); return () => tools.delete(tool.name); } } }, session: { id: 'story', deriveMessages: () => [{ id: 'assistant-1', role: 'assistant', content: [{ type: 'tool-call', id: 'call-1', name: 'rp_present', arguments: '{}' }] }] } };
   const codeAgent = { id: 'code', ctx: { tools: { register: (tool) => { codeTools.set(tool.name, tool); return () => codeTools.delete(tool.name); } } }, session: { id: 'code' } };
   const agents = new Map([['story', agent], ['code', codeAgent]]);
   ctx.agents.list = () => [...agents.values()];
   ctx.agents.get = (id) => agents.get(id);
   let concluded = 0;
   const exec = { agent, callId: 'call-1', rootCallId: 'call-1', signal: new AbortController().signal, concludeTurn: () => concluded++ };
-  return { ctx, service, calls, tools, globalTools, codeTools, contexts, toolProviders, listeners, bound, ptc, agent, codeAgent, exec, concluded: () => concluded, current: (value) => { current = value; } };
+  return { ctx, service, calls, conditions, tools, globalTools, codeTools, contexts, toolProviders, listeners, bound, ptc, agent, codeAgent, exec, concluded: () => concluded, current: (value) => { current = value; } };
 }
 
 test('regenerateOf is a mutually exclusive terminal mode and tool JSON cannot supply owner guidance',async()=>{
@@ -63,11 +65,11 @@ test('installs tools only in a ready bound native agent scope and leaves unbound
   assert.equal(f.contexts.get('rp-last-step-binding').required, true);
   assert.equal(f.contexts.get('rp-last-step-binding').interpolate, false);
   assert.equal(f.contexts.get('rp-last-step-agent').text({}), 'AGENT ONLY RULES');
-  const result = { sections: [], contexts: [], variables: {}, tools: [{ name: 'lookup' }, ...[...f.tools.keys()].map((name) => ({ name }))] };
-  const filter = f.listeners.get('system-prompt/assemble');
-  assert.equal((await filter(result, {}, async () => result)).tools.length, 5);
+  const selection={};
+  assert.equal(f.conditions.get('rp_present')({agent:f.agent,modelSelection:selection}),true);
+  assert.equal(f.conditions.get('rp_present')({agent:f.codeAgent,modelSelection:selection}),false);
+  assert.equal(f.listeners.has('system-prompt/assemble'),false);
   f.current({ id: 'code', session: { id: 'code' } });
-  assert.deepEqual((await filter(result, {}, async () => result)).tools, [{ name: 'lookup' }]);
   assert.equal(f.contexts.get('rp-last-step-binding').text({}), '');
   assert.equal(f.contexts.get('rp-last-step-agent').text({}), '');
   assert.equal(f.contexts.get('rp-last-step-workflow').text({}), '');
@@ -102,8 +104,7 @@ test('an accepted assembly cannot expose one agent binding outside its initiator
   f.current({ id: 'code', session: { id: 'code' } });
   assert.equal(f.contexts.get('rp-last-step-binding').text(context), '');
   assert.equal(f.contexts.get('rp-last-step-agent').text(context), '');
-  const assembly = { sections: [], contexts: [], variables: {}, tools: [{ name: 'lookup' }, { name: 'rp_present' }] };
-  assert.deepEqual((await f.listeners.get('system-prompt/assemble')(assembly, context, async () => assembly)).tools, [{ name: 'lookup' }]);
+  assert.equal(f.conditions.get('rp_present')({agent:f.codeAgent,modelSelection:{}}),false);
 });
 
 test('rp_present accepts only one direct call in the latest assistant message and concludes after success', async () => {

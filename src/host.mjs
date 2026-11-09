@@ -18,6 +18,7 @@ import {projectStoryHistory,validFactProjection} from './story-history.mjs';
 import {createDraftStore} from './drafts.mjs';
 import {createOwnerOperations} from './adoption.mjs';
 import {createOwnerState} from './owner-state.mjs';
+import {withSessionLineage} from './lineage.mjs';
 import {readOwnedState,selectState,preflightState,validateCanonicalState,mergeState,stateFingerprint} from './transfer.mjs';
 
 export const name = 'rp-last-step';
@@ -126,7 +127,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
   function waitForStorage(){if(!['exclusive','recovery'].includes(transferPhase))return Promise.resolve();return new Promise((resolve,reject)=>gateWaiters.add({resolve,reject}));}
   function trackCanonical(owned,work){const pending=owned?workScope.run({admitted:true},work):work();if(owned){canonicalJobs.add(pending);void pending.then(()=>canonicalJobs.delete(pending),()=>canonicalJobs.delete(pending));}return pending;}
   function sessionSet(input){if(!Array.isArray(input)||!input.length||input.some(id=>typeof id!=='string'||!id.trim()||id.length>256)||new Set(input).size!==input.length)throw new PresetError('RESTORE_PAYLOAD_INVALID','A nonempty set of Session IDs is required',409);return copy(input);}
-  async function sessionFamily(ids,signal){const sessions=new Map(),queue=[...ids];for(let index=0;index<queue.length;index++){const id=queue[index];if(sessions.has(id))continue;const snapshot=await canonicalSession(id,undefined,signal);sessions.set(id,snapshot);if(snapshot.header.parentSession)queue.push(snapshot.header.parentSession);}return sessions;}
+  async function sessionFamily(ids,signal,lineages){const sessions=new Map(),queue=[...ids];for(let index=0;index<queue.length;index++){const id=queue[index];if(sessions.has(id))continue;const snapshot=await canonicalSession(id,undefined,signal,lineages);sessions.set(id,snapshot);if(snapshot.parentSession)queue.push(snapshot.parentSession);}return sessions;}
   function exclusive(ids,signal,kind,work){
     const lifetime=new AbortController(),combined=signal?AbortSignal.any([signal,lifetime.signal]):lifetime.signal;operations.add(lifetime);
     const job=exclusiveQueue.then(async()=>{
@@ -186,20 +187,20 @@ export async function createRpLastStepHost(ctx, options = {}) {
       try { await iterator?.return?.(); } catch { /* Closing the reader cannot replace its accepted result or safe error. */ }
     }
   }
-  async function canonicalSession(id,agent,signal){
+  async function canonicalSession(id,agent,signal,lineages){
     await readSession(id,signal);
     const live=ctx.agents.get(id);
     if(agent&&agent!==live)throw new PresetError('AGENT_MISMATCH','The caller does not own this session',403);
-    if(live?.session.snapshotEvents)return{header:copy(live.session.header),events:live.session.snapshotEvents(),inheritedEventCount:live.session.inheritedEventCount};
+    if(live?.session.snapshotEvents)return withSessionLineage(ctx,{header:copy(live.session.header),events:live.session.snapshotEvents(),inheritedEventCount:live.session.inheritedEventCount},signal,lineages);
     const query=ctx.get?.('sessionQuery');
     if(!query?.observeSession)throw new PresetError('NARRATIVE_UNAVAILABLE','The canonical session log is unavailable',503);
-    const view=await query.observeSession(id);try{return{header:copy(view.header),events:copy(view.events),inheritedEventCount:view.inheritedEventCount};}finally{view[Symbol.dispose]();}
+    const view=await query.observeSession(id);try{return await withSessionLineage(ctx,{header:copy(view.header),events:copy(view.events),inheritedEventCount:view.inheritedEventCount},signal,lineages);}finally{view[Symbol.dispose]();}
   }
   async function narrativeEvents(id,agent,signal){return(await canonicalSession(id,agent,signal)).events;}
   async function descendsFrom(child,ancestor,signal){
     const seen=new Set([child.header.id]);
-    while(child.header.parentSession){
-      const parentId=child.header.parentSession;if(seen.has(parentId))return false;seen.add(parentId);
+    while(child.parentSession){
+      const parentId=child.parentSession;if(seen.has(parentId))return false;seen.add(parentId);
       const parent=await canonicalSession(parentId,undefined,signal),count=child.inheritedEventCount;
       if(!Number.isSafeInteger(count)||count<0||count>child.events.length||count>parent.events.length||!child.events.slice(0,count).every((event,index)=>isDeepStrictEqual(event,parent.events[index])))return false;
       if(parentId===ancestor)return true;child=parent;
@@ -325,7 +326,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
       seen.add(owner);
       const contexts=new Set(activePresentationContexts(owner,events)),inherited=new Set(activePresentationContexts(owner,prefix));
       if((await receipts.list(owner)).some(receipt=>contexts.has(receipt.contextKey)&&inherited.has(receipt.contextKey)&&linked(receipt)))return false;
-      const parentId=branch.header.parentSession;if(!parentId)break;
+      const parentId=branch.parentSession;if(!parentId)break;
       if(seen.has(parentId)||!await descendsFrom(branch,parentId,signal))throw new PresetError('SESSION_ANCESTRY_REQUIRED','The inherited presentation prefix could not be verified',409);
       prefix=prefix.slice(0,branch.inheritedEventCount);owner=parentId;branch=await canonicalSession(parentId,undefined,signal);
     }
@@ -484,7 +485,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     }).catch(error=>{if(error?.name==='AbortError')return{status:'interrupted',errorCode:'PRESENTATION_CANCELLED'};throw error;});
   }
   const service = {
-    apiVersion:1,capabilities:Object.freeze({narrativeRevisions:1}),
+    apiVersion:1,capabilities:Object.freeze({narrativeRevisions:1,sessionLineage:1}),
     isEnabled(id) {
       if (stopped) return false;
       const admitted = admissions.get(id);
@@ -538,7 +539,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     async exportState(input){
       const ids=sessionSet(input.sessionIds),refs=input.additionalProfileRefs===undefined?[]:copy(input.additionalProfileRefs);
       if(!Array.isArray(refs)||refs.some(ref=>!object(ref)||Object.keys(ref).length!==2||typeof ref.profileId!=='string'||!ref.profileId.trim()||ref.profileId.length>256||!Number.isSafeInteger(ref.version)||ref.version<1))throw new PresetError('INVALID_PROFILE','Additional profile references require only profileId and a positive integer version');
-      for(const id of ids){const snapshot=await canonicalSession(id,undefined,input.signal);if(snapshot.header.parentSession&&!await store.binding(id)&&await store.binding(snapshot.header.parentSession))await service.inheritSession({parentSessionId:snapshot.header.parentSession,sessionId:id,signal:input.signal});}
+      for(const id of ids){const snapshot=await canonicalSession(id,undefined,input.signal);if(snapshot.parentSession&&!await store.binding(id)&&await store.binding(snapshot.parentSession))await service.inheritSession({parentSessionId:snapshot.parentSession,sessionId:id,signal:input.signal});}
       return exclusive(ids,input.signal,'export',async signal=>{
         const sessions=await sessionFamily(ids,signal),captured=await ownerState.read(async revision=>({revision,raw:await readOwnedState(directory)})),payload=selectState(captured.raw,ids,sessions,refs);validateCanonicalState(payload,sessions);await validateFactLinks(sessions,signal);
         return{schemaVersion:1,revision:captured.revision,payload};
@@ -556,7 +557,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
         if(previous){if(previous.hash!==hash)throw new PresetError('RESTORE_ID_CONFLICT','The restore ID identifies different payload or Sessions',409);return copy(previous.result);}
         const preview=preflightState(raw,ids,state);if(!preview.supported)throw new PresetError(preview.conflicts[0].code,'The saved LastStep content has a conflict or missing requirement',409);
         if(factTransferRequirement(state))throw new PresetError('EFFECTIVE_HISTORY_UNAVAILABLE','Saved fact revisions require Database fact review capability',503);
-        const sessions=await sessionFamily(ids,signal);validateCanonicalState(state.payload,sessions);await validateFactLinks(sessions,signal);signal.throwIfAborted();
+        const sessions=await sessionFamily(ids,signal,input.lineages);validateCanonicalState(state.payload,sessions);await validateFactLinks(sessions,signal);signal.throwIfAborted();
         const result=await ownerState.switchRoot({expectedRevision:input.expectedRevision,build:async(stage,generation)=>{
           const restored=await mergeState(stage,raw,state,{restoreId,sessionIds:ids,generation,hash}),merged=await readOwnedState(stage),check=preflightState(merged,ids,state);if(!check.supported)throw new PresetError('RESTORE_PAYLOAD_INVALID','Staged LastStep data failed validation',409);return restored;
         }});
@@ -565,7 +566,7 @@ export async function createRpLastStepHost(ctx, options = {}) {
     },
     inheritSession(input){const captured=copy({parentSessionId:input.parentSessionId,sessionId:input.sessionId});return run(input.signal,async signal=>{
       const child=await canonicalSession(captured.sessionId,undefined,signal);
-      if(child.header.parentSession!==captured.parentSessionId||!await descendsFrom(child,captured.parentSessionId,signal))throw new PresetError('SESSION_ANCESTRY_REQUIRED','The target is not a verified child prefix of this parent',409);
+      if(child.parentSession!==captured.parentSessionId||!await descendsFrom(child,captured.parentSessionId,signal))throw new PresetError('SESSION_ANCESTRY_REQUIRED','The target is not a verified child prefix of this parent',409);
       if(await store.binding(captured.sessionId))return{revision:(await store.snapshot()).revision};
       const latest=readNarratives(captured.sessionId,child.events).filter(record=>record.ref.baseResultSeq<child.inheritedEventCount).at(-1);
       let composition;
